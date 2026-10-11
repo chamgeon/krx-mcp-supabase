@@ -9,6 +9,11 @@ An MCP server (a Supabase Edge Function) hands ChatGPT / Claude the report alrea
 | `get_stock_history(code, days)` | Recent daily rows for one stock (helps explain *why* it moved) |
 | `find_stock(name)` | Name → 종목코드 |
 | `list_available_dates()` | Which days are loaded |
+| `screen_stocks(date?, filters…)` | All stocks matching optional filters — 등락률/거래대금/시총, 거래대금 vs N-day avg, 거래대금 연속 증가, 박스권 + 거래대금 증가, 20/60/120-day breakouts, 연속 상승, volatility — with every metric per row. Runs as the SQL function `public.screen_stocks` |
+| `analyze_stock(stock, date?)` | One stock: 1/5/10/20/60/120-day returns, 거래대금 ratios and spikes, MA5/20/60/120 (정배열, 5/20 cross), breakouts, volatility/ATR, up/down streaks, box and price-vs-거래대금 divergence, plus a `signals` list |
+
+The screening and analysis tools are pure SQL/TypeScript math on stored data (no LLM). Windows count trading days, so
+120-day metrics need ~121 loaded days (backfill ~6 months); anything without enough history comes back `null`.
 
 The LLM does the rest: web search for the reason each stock rose, and building the Excel file.
 
