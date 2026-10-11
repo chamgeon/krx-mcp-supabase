@@ -117,6 +117,7 @@ function analyze(
 ) {
   const close = rows.map((r) => r.close ?? 0)
   const trdval = rows.map((r) => r.trdval ?? 0)
+  const volume = rows.map((r) => r.volume ?? 0)
   const n = rows.length
   const t = rows[0]
   const signals: Signal[] = []
@@ -139,8 +140,14 @@ function analyze(
       spikes.push({ date: rows[i].bas_dd, trdval_eok: eok(trdval[i]), ratio: round(trdval[i] / a), fluc_rt: rows[i].fluc_rt })
     }
   }
+  const volAvgN = n >= 1 + opts.avg_days ? mean(volume.slice(1, 1 + opts.avg_days)) : null
+  const volAvg5 = n >= 6 ? mean(volume.slice(1, 6)) : null
+  const volRatio = volAvgN ? round(volume[0] / volAvgN) : null
   if (ratio != null && ratio >= opts.spike_ratio) {
     signals.push({ code: 'TRDVAL_SPIKE', detail: `거래대금이 직전 ${opts.avg_days}일 평균의 ${ratio}배` })
+  }
+  if (volRatio != null && volRatio >= opts.spike_ratio) {
+    signals.push({ code: 'VOLUME_SPIKE', detail: `거래량이 직전 ${opts.avg_days}일 평균의 ${volRatio}배` })
   }
   if (trdvalUp >= 3) signals.push({ code: 'TRDVAL_RISING_STREAK', detail: `거래대금 ${trdvalUp}일 연속 증가` })
 
@@ -246,6 +253,13 @@ function analyze(
       ratio_vs_avg5: avg5 ? round(trdval[0] / avg5) : null,
       consecutive_up_days: trdvalUp,
       spikes_last_20d: spikes,
+    },
+    volume: {
+      today: volume[0],
+      avg5_prior: round(volAvg5, 0),
+      [`avg${opts.avg_days}_prior`]: round(volAvgN, 0),
+      ratio_vs_avg: volRatio,
+      ratio_vs_avg5: volAvg5 ? round(volume[0] / volAvg5) : null,
     },
     moving_averages: { ...mas, bullish_alignment: bullishAlignment, bearish_alignment: bearishAlignment },
     breakouts,
@@ -375,11 +389,13 @@ const handler = createMcpHandler(() => {
       description:
         'Screens every KOSPI/KOSDAQ stock on one trading day with optional quantitative filters (omit a filter to turn it off). ' +
         'All metrics are computed in SQL from stored end-of-day data; windows count trading days. Every row returns all metrics, ' +
-        'whichever filters were used: trdval_ratio = 거래대금 / prior avg_days average; trdval_up_days / price_up_days = consecutive ' +
+        'whichever filters were used: trdval_ratio = 거래대금 / prior avg_days average; volume_ratio = 거래량 / prior avg_days ' +
+        'average (거래량 = shares traded, 거래대금 = won traded); trdval_up_days / price_up_days = consecutive ' +
         'daily increases ending on the date; volatility = stddev of daily 등락률 (%) over volatility_days; sideways_range_pct = ' +
         '(highest high - lowest low) / lowest low over sideways_days; sideways_trdval_growth = avg 거래대금 of the last ' +
         'sideways_recent_days / avg of the rest of the box; breakout_N = close > highest high of the prior N days (null if history is short). ' +
-        'Example: box + rising volume = {max_sideways_range: 15, min_sideways_trdval_growth: 2}.',
+        'Examples: 거래량 >= 3x prior 5-day average = {avg_days: 5, min_volume_ratio: 3}; ' +
+        'box + rising 거래대금 = {max_sideways_range: 15, min_sideways_trdval_growth: 2}.',
       inputSchema: z.object({
         date: z.string().regex(/^\d{4}-?\d{2}-?\d{2}$/).optional().describe('YYYY-MM-DD or YYYYMMDD. Omit for the latest day.'),
         market: z.enum(['KOSPI', 'KOSDAQ']).optional(),
@@ -387,8 +403,10 @@ const handler = createMcpHandler(() => {
         max_fluc_rt: z.number().optional().describe('등락률 % <='),
         min_trdval_eok: z.number().optional().describe('거래대금 (억원) >='),
         min_mktcap_eok: z.number().optional().describe('시가총액 (억원) >='),
-        avg_days: z.number().int().min(1).max(120).default(20).describe('Window for the trading value average'),
+        avg_days: z.number().int().min(1).max(120).default(20).describe('Prior-day window for the 거래대금 and 거래량 averages'),
         min_trdval_ratio: z.number().optional().describe('거래대금 / prior avg_days average >= (e.g. 3)'),
+        min_volume: z.number().int().optional().describe('거래량 (shares) >='),
+        min_volume_ratio: z.number().optional().describe('거래량 / prior avg_days average >= (e.g. 3)'),
         min_trdval_up_days: z.number().int().min(1).optional().describe('거래대금 increased at least this many days in a row'),
         sideways_days: z.number().int().min(5).max(120).default(20),
         sideways_recent_days: z.number().int().min(1).max(60).default(5),
@@ -404,7 +422,7 @@ const handler = createMcpHandler(() => {
         max_volatility: z.number().optional(),
         sort: z
           .enum([
-            'fluc_rt', 'trdval', 'trdval_ratio', 'trdval_up_days', 'price_up_days',
+            'fluc_rt', 'trdval', 'trdval_ratio', 'volume', 'volume_ratio', 'trdval_up_days', 'price_up_days',
             'volatility', 'sideways_range_pct', 'sideways_trdval_growth', 'mktcap',
           ])
           .default('fluc_rt')
@@ -429,6 +447,8 @@ const handler = createMcpHandler(() => {
         p_min_mktcap: a.min_mktcap_eok == null ? null : Math.round(a.min_mktcap_eok * EOK),
         p_avg_days: a.avg_days,
         p_min_trdval_ratio: a.min_trdval_ratio ?? null,
+        p_min_volume: a.min_volume ?? null,
+        p_min_volume_ratio: a.min_volume_ratio ?? null,
         p_min_trdval_up_days: a.min_trdval_up_days ?? null,
         p_sideways_days: a.sideways_days,
         p_sideways_recent_days: a.sideways_recent_days,
@@ -461,6 +481,9 @@ const handler = createMcpHandler(() => {
           mktcap_eok: eok(r.mktcap),
           trdval_avg_eok: eok(r.trdval_avg),
           trdval_ratio: r.trdval_ratio,
+          volume: r.volume,
+          volume_avg: r.volume_avg,
+          volume_ratio: r.volume_ratio,
           trdval_up_days: r.trdval_up_days,
           price_up_days: r.price_up_days,
           price_down_days: r.price_down_days,
@@ -485,7 +508,7 @@ const handler = createMcpHandler(() => {
       title: '종목 정량 분석',
       description:
         'Quantitative analysis of one stock as of a date, computed from stored daily data (no news, no LLM): returns over ' +
-        '1/5/10/20/60/120 days, trading value vs averages and recent spikes, MA5/20/60/120 with alignment and 5/20 crosses, ' +
+        '1/5/10/20/60/120 days, 거래대금 and 거래량 vs prior averages, recent 거래대금 spikes, MA5/20/60/120 with alignment and 5/20 crosses, ' +
         '20/60/120-day breakouts (close > prior N-day high), volatility (stddev of 등락률, ATR14), up/down streaks, ' +
         'consolidation box and price vs trading value divergence, plus a list of triggered signals. ' +
         'Metrics needing more history than is loaded are null.',
@@ -493,7 +516,7 @@ const handler = createMcpHandler(() => {
         stock: z.string().min(1).describe('6-character 종목코드 (e.g. 005930) or exact/partial 종목명'),
         date: z.string().regex(/^\d{4}-?\d{2}-?\d{2}$/).optional().describe('Analysis date. Omit for the latest day.'),
         avg_days: z.number().int().min(1).max(120).default(20),
-        spike_ratio: z.number().min(1).default(2).describe('A day is a spike when 거래대금 >= this × prior avg_days average'),
+        spike_ratio: z.number().min(1).default(2).describe('A day is a spike when 거래대금 (or 거래량) >= this × prior avg_days average'),
         sideways_days: z.number().int().min(6).max(120).default(20),
         sideways_max_range: z.number().default(15).describe('Box range % at or below which the stock counts as consolidating'),
       }),
