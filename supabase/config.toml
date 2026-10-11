@@ -1,0 +1,6 @@
+# Both functions do their own auth (secret key / secret header), so the gateway JWT check is off.
+[functions.mcp]
+verify_jwt = false
+
+[functions.krx-ingest]
+verify_jwt = false
