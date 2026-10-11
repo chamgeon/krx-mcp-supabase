@@ -115,12 +115,15 @@ function analyze(
   rows: Row[],
   opts: { avg_days: number; spike_ratio: number; sideways_days: number; sideways_max_range: number },
 ) {
+  // KRX reports days without trades (halt / no trades) with open/high/low = 0 and the close carried forward
+  const traded = (r: Row) => (r.trdval ?? 0) > 0 && (r.high ?? 0) > 0
   const close = rows.map((r) => r.close ?? 0)
   const trdval = rows.map((r) => r.trdval ?? 0)
   const volume = rows.map((r) => r.volume ?? 0)
   const n = rows.length
   const t = rows[0]
   const signals: Signal[] = []
+  if (!traded(t)) signals.push({ code: 'NO_TRADES', detail: '이 날 거래 없음 (거래정지 또는 무거래) — 가격 지표는 마지막 체결가 기준' })
 
   // Returns
   const ret = (k: number) => (n > k ? pct(close[0], close[k]) : null)
@@ -175,10 +178,11 @@ function analyze(
   const breakouts = Object.fromEntries(
     [20, 60, 120].map((k) => {
       if (n <= k) return [`d${k}`, null]
-      const prior = rows.slice(1, k + 1)
-      const hi = Math.max(...prior.map((r) => r.high ?? 0))
-      const lo = Math.min(...prior.map((r) => r.low ?? Infinity).filter((v) => v > 0))
-      const broke = close[0] > hi
+      const prior = rows.slice(1, k + 1).filter(traded)
+      if (prior.length === 0) return [`d${k}`, null]
+      const hi = Math.max(...prior.map((r) => r.high!))
+      const lo = Math.min(...prior.map((r) => r.low!))
+      const broke = traded(t) && close[0] > hi
       if (broke) signals.push({ code: `BREAKOUT_${k}D`, detail: `종가가 직전 ${k}일 최고가(${hi}) 돌파` })
       return [`d${k}`, { prior_high: hi, prior_low: lo, breakout: broke, close_vs_high_pct: pct(close[0], hi) }]
     }),
@@ -190,6 +194,7 @@ function analyze(
   const trs = []
   for (let i = 0; i < Math.min(14, n - 1); i++) {
     const r = rows[i], pc = close[i + 1]
+    if (!traded(r)) continue
     trs.push(Math.max((r.high ?? 0) - (r.low ?? 0), Math.abs((r.high ?? 0) - pc), Math.abs((r.low ?? 0) - pc)))
   }
   let up = 0, down = 0
@@ -203,8 +208,9 @@ function analyze(
   const sd = opts.sideways_days
   if (n >= sd) {
     const box = rows.slice(0, sd)
-    const hi = Math.max(...box.map((r) => r.high ?? 0))
-    const lo = Math.min(...box.map((r) => r.low ?? Infinity).filter((v) => v > 0))
+    const tradedBox = box.filter(traded)
+    const hi = tradedBox.length ? Math.max(...tradedBox.map((r) => r.high!)) : null
+    const lo = tradedBox.length ? Math.min(...tradedBox.map((r) => r.low!)) : null
     const range = pct(hi, lo)
     const recent = mean(trdval.slice(0, 5))
     const early = mean(trdval.slice(5, sd))
@@ -243,6 +249,7 @@ function analyze(
     name: t.isu_nm,
     market: t.market,
     history_days: n,
+    traded_on_date: traded(t),
     price: { close: t.close, open: t.open, high: t.high, low: t.low, fluc_rt: t.fluc_rt, mktcap_eok: eok(t.mktcap) },
     returns_pct: returns,
     trading_value: {
@@ -393,12 +400,17 @@ const handler = createMcpHandler(() => {
         'average (거래량 = shares traded, 거래대금 = won traded); trdval_up_days / price_up_days = consecutive ' +
         'daily increases ending on the date; volatility = stddev of daily 등락률 (%) over volatility_days; sideways_range_pct = ' +
         '(highest high - lowest low) / lowest low over sideways_days; sideways_trdval_growth = avg 거래대금 of the last ' +
-        'sideways_recent_days / avg of the rest of the box; breakout_N = close > highest high of the prior N days (null if history is short). ' +
+        'sideways_recent_days / avg of the rest of the box; breakout_N = close > highest high of the prior N days (null if history is short; ' +
+        '60/120-day highs are only computed when breakout_days lists them). Streaks are counted within the last ~20 trading days. ' +
         'Examples: 거래량 >= 3x prior 5-day average = {avg_days: 5, min_volume_ratio: 3}; ' +
         'box + rising 거래대금 = {max_sideways_range: 15, min_sideways_trdval_growth: 2}.',
       inputSchema: z.object({
         date: z.string().regex(/^\d{4}-?\d{2}-?\d{2}$/).optional().describe('YYYY-MM-DD or YYYYMMDD. Omit for the latest day.'),
         market: z.enum(['KOSPI', 'KOSDAQ']).optional(),
+        include_untraded: z
+          .boolean()
+          .default(false)
+          .describe('Include stocks with 거래대금 = 0 on the date (trading halt or no trades). Off by default.'),
         min_fluc_rt: z.number().optional().describe('등락률 % >='),
         max_fluc_rt: z.number().optional().describe('등락률 % <='),
         min_trdval_eok: z.number().optional().describe('거래대금 (억원) >='),
@@ -441,6 +453,7 @@ const handler = createMcpHandler(() => {
       const { data, error } = await supabase.rpc('screen_stocks', {
         p_date: day,
         p_market: a.market ?? null,
+        p_include_untraded: a.include_untraded,
         p_min_fluc_rt: a.min_fluc_rt ?? null,
         p_max_fluc_rt: a.max_fluc_rt ?? null,
         p_min_trdval: a.min_trdval_eok == null ? null : Math.round(a.min_trdval_eok * EOK),
