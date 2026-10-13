@@ -137,7 +137,7 @@ If a long range times out, split it into ~1-month chunks.
 2. Copy `sql/cron.example.sql` to `sql/cron.sql` (git-ignored) and fill in `<PROJECT_REF>` and `<INGEST_SECRET>`.
 3. Run it in the SQL Editor.
 
-It schedules a load every 30 minutes on weekdays from 16:00 to 23:30 KST, so the day is picked up as soon as KRX
+It schedules a load every 30 minutes on weekdays from 15:40 to 23:40 KST, so the day is picked up as soon as KRX
 publishes it. Daily runs every 30 minutes from 07:00 to 08:30 KST pick up data KRX publishes the next
 morning and fill in any day the evening runs missed.
 
