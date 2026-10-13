@@ -125,7 +125,7 @@ Deno.serve(async (req) => {
     }
   } else {
     // Default: any weekday in the last 7 days we don't have yet, plus today (always re-fetched,
-    // so the evening run overwrites the 16:10 run with final numbers incl. after-hours trading)
+    // so the latest run wins once KRX publishes final numbers)
     const today = todayKst()
     const start = new Date(today.getTime() - 7 * 86400000)
     const have = await existingDates(toIsoDate(ymd(start)), toIsoDate(ymd(today)))

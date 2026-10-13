@@ -137,8 +137,9 @@ If a long range times out, split it into ~1-month chunks.
 2. Copy `sql/cron.example.sql` to `sql/cron.sql` (git-ignored) and fill in `<PROJECT_REF>` and `<INGEST_SECRET>`.
 3. Run it in the SQL Editor.
 
-It schedules loads on weekdays at 15:40 and 16:10 KST (first data after the close) and at 18:40 KST (final numbers
-after after-hours trading). A daily 08:20 KST run fills in any day the evening runs missed.
+It schedules a load every 30 minutes on weekdays from 16:00 to 23:30 KST, so the day is picked up as soon as KRX
+publishes it. Daily runs every 30 minutes from 07:00 to 08:30 KST pick up data KRX publishes the next
+morning and fill in any day the evening runs missed.
 
 ### 7. Connect a chatbot
 
@@ -162,8 +163,8 @@ Example prompt:
 
 ## Notes
 
-- **Timing**: same-day data appears from ~15:40 KST and is overwritten with final numbers at 18:40 KST. If KRX hasn't
-  published yet, a run stores nothing and the next run picks it up.
+- **Timing**: KRX publishes a trading day's data some time after the close, often only the next morning (~08:00 KST).
+  Until then a run stores nothing and a later run picks it up; each run re-fetches today, so the last one wins.
 - **Security**: the `?key=` in the URL is the only protection on the MCP endpoint, so keep the URL private. The table
   has RLS enabled with no policies, and only the service role (used by the Edge Functions) can read it or run
   `screen_stocks`.

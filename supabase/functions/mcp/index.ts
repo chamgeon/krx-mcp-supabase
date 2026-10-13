@@ -293,7 +293,7 @@ const handler = createMcpHandler(() => {
         `sheet1 = 등락률 >= +${SHEET1_MIN_RATE}%; ` +
         `sheet2 = 등락률 >= +${SHEET2_MIN_RATE}% AND 거래대금 >= 500억원, excluding sheet1 stocks; ` +
         'both sorted by 등락률 descending. sheet3 = 일봉/주봉/월봉 chart URLs for every stock in sheet1 and sheet2. ' +
-        'Data is end-of-day from KRX: loaded at 15:40–16:10 KST and finalized at 18:40 KST (after-hours trading included). ' +
+        'Data is end-of-day from KRX, loaded once KRX publishes it: some time after the close, often only the next morning (by ~08:30 KST). ' +
         'Omit date to get the latest available trading day. This tool has no news — search the web for why each stock rose.',
       inputSchema: z.object({
         date: z
@@ -326,8 +326,8 @@ const handler = createMcpHandler(() => {
           return json({
             date: day,
             error:
-              'No data for this date. It may be a holiday/weekend, or it is before ~15:40–16:10 KST and ' +
-              "today's data isn't loaded yet. Call list_available_dates.",
+              'No data for this date. It may be a holiday/weekend, or KRX has not published it yet ' +
+              '(it often appears only the next morning). Call list_available_dates.',
           })
         }
       }
