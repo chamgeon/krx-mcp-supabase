@@ -461,8 +461,10 @@ const handler = createMcpHandler(() => {
         'average (거래량 = shares traded, 거래대금 = won traded); trdval_up_days / price_up_days = consecutive ' +
         'daily increases ending on the date; volatility = stddev of daily 등락률 (%) over volatility_days; sideways_range_pct = ' +
         '(highest high - lowest low) / lowest low over sideways_days; sideways_trdval_growth = avg 거래대금 of the last ' +
-        'sideways_recent_days / avg of the rest of the box; breakout_N = close > highest high of the prior N days (null if history is short; ' +
-        '60/120-day highs are only computed when breakout_days lists them). Streaks are counted within the last ~20 trading days. ' +
+        'sideways_recent_days / avg of the rest of the box; breakout_N = close > highest high of the prior N days (null if the stock ' +
+        'has too little history). high_60/high_120/breakout_60/breakout_120 are only computed, and only returned, when breakout_days ' +
+        'lists 60 or 120; to find 60/120-day breakouts pass e.g. {breakout_days: [60]}. The database holds about a year of history. ' +
+        'Streaks are counted within the last ~20 trading days. ' +
         'Examples: 거래량 >= 3x prior 5-day average = {avg_days: 5, min_volume_ratio: 3}; ' +
         'box + rising 거래대금 = {max_sideways_range: 15, min_sideways_trdval_growth: 2}.',
       inputSchema: z.object({
@@ -540,10 +542,21 @@ const handler = createMcpHandler(() => {
 
       const rows = (data ?? []) as Record<string, any>[]
       const { date: _d, limit: _l, ...filters } = a
+      // The 60/120-day highs are skipped in SQL unless asked for; leave the keys out rather than return nulls
+      // that read as missing history
+      const with60 = a.breakout_days?.some((n) => n >= 60) ?? false
+      const with120 = a.breakout_days?.includes(120) ?? false
       return json({
         date: day,
         ...(await dataStatus(day)),
         filters,
+        notes: [
+          ...(with120 ? [] : [
+            `${with60 ? '120' : '60/120'}-day highs and breakouts were not computed (only when breakout_days lists them, ` +
+              'e.g. breakout_days: [60] or [120]). This is not missing data: about a year of history is stored.',
+          ]),
+          'window_days = rows in the ~20-trading-day calculation window (capped), not the total history stored.',
+        ],
         count: rows.length,
         truncated: rows.length === a.limit,
         stocks: rows.map((r) => ({
@@ -566,12 +579,10 @@ const handler = createMcpHandler(() => {
           sideways_range_pct: r.sideways_range_pct,
           sideways_trdval_growth: r.sideways_trdval_growth,
           breakout_20: r.breakout_20,
-          breakout_60: r.breakout_60,
-          breakout_120: r.breakout_120,
           high_20: r.high_20,
-          high_60: r.high_60,
-          high_120: r.high_120,
-          history_days: r.history_days,
+          ...(with60 ? { breakout_60: r.breakout_60, high_60: r.high_60 } : {}),
+          ...(with120 ? { breakout_120: r.breakout_120, high_120: r.high_120 } : {}),
+          window_days: r.history_days,
         })),
       })
     },
