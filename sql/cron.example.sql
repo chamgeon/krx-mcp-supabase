@@ -2,35 +2,41 @@
 -- Supabase dashboard → SQL Editor. It's not a migration because it contains your secret.
 -- First enable the extensions: Database → Extensions → pg_cron and pg_net.
 --
--- Each run fetches today (always re-fetched, so later runs overwrite earlier ones) plus any missing
--- weekdays from the last 7 days. Cron times are UTC (KST = UTC+9):
---   15:40 KST       (06:40 UTC)       Mon–Fri  first try, 10 min after the 15:30 close
---   16:10–23:40 KST (07:10–14:40 UTC) Mon–Fri  every 30 min: picks up the day as soon as KRX publishes it
---   07:00–08:30 KST (22:00–23:30 UTC) daily    every 30 min: KRX often publishes only the next morning;
---                                              also catches any day the evening runs missed
+-- Cron times are UTC (KST = UTC+9):
+--   kis-ingest  15:40, 16:00, 18:00 KST  (06:40, 07:00, 09:00 UTC)  Mon–Fri
+--               same-day provisional snapshot from KIS: 10 min after the 15:30 close, then again after
+--               시간외 종가 (15:40–16:00) and 시간외 단일가 (16:00–18:00); each run overwrites the day,
+--               and holidays are skipped.
+--   krx-ingest  07:00–08:30 KST          (22:00–23:30 UTC)        daily, every 30 min
+--               KRX official data, published the next morning; replaces the KIS rows. Also fetches any
+--               weekday from the last 7 days that still has no KRX data.
+--
+-- Migrating from the KRX-only schedule? Remove the old jobs first:
+--   select cron.unschedule('krx-ingest-close');
+--   select cron.unschedule('krx-ingest-evening');
 
 select cron.schedule(
-  'krx-ingest-close',
+  'kis-ingest-close',
   '40 6 * * 1-5',
   $$
   select net.http_post(
-    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/krx-ingest',
+    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/kis-ingest',
     headers := jsonb_build_object('Content-Type', 'application/json', 'x-ingest-secret', '<INGEST_SECRET>'),
     body := '{}'::jsonb,
-    timeout_milliseconds := 60000
+    timeout_milliseconds := 150000
   );
   $$
 );
 
 select cron.schedule(
-  'krx-ingest-evening',
-  '10,40 7-14 * * 1-5',
+  'kis-ingest-after-hours',
+  '0 7,9 * * 1-5',
   $$
   select net.http_post(
-    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/krx-ingest',
+    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/kis-ingest',
     headers := jsonb_build_object('Content-Type', 'application/json', 'x-ingest-secret', '<INGEST_SECRET>'),
     body := '{}'::jsonb,
-    timeout_milliseconds := 60000
+    timeout_milliseconds := 150000
   );
   $$
 );
@@ -43,13 +49,13 @@ select cron.schedule(
     url := 'https://<PROJECT_REF>.supabase.co/functions/v1/krx-ingest',
     headers := jsonb_build_object('Content-Type', 'application/json', 'x-ingest-secret', '<INGEST_SECRET>'),
     body := '{}'::jsonb,
-    timeout_milliseconds := 60000
+    timeout_milliseconds := 150000
   );
   $$
 );
 
 -- Check runs:   select * from cron.job_run_details order by start_time desc limit 10;
 -- HTTP results: select * from net._http_response order by created desc limit 10;
--- Remove:       select cron.unschedule('krx-ingest-close');
---               select cron.unschedule('krx-ingest-evening');
+-- Remove:       select cron.unschedule('kis-ingest-close');
+--               select cron.unschedule('kis-ingest-after-hours');
 --               select cron.unschedule('krx-ingest-morning');

@@ -1,5 +1,5 @@
 // MCP server for the daily KR-stock movers report.
-// Reads only from Postgres (filled by krx-ingest); never calls KRX, so the KRX key stays here.
+// Reads only from Postgres (filled by kis-ingest / krx-ingest); never calls KIS or KRX, so their keys stay there.
 //
 // URL to give ChatGPT / Claude:
 //   https://<project-ref>.supabase.co/functions/v1/mcp?key=<MCP_ACCESS_KEY>
@@ -68,6 +68,20 @@ function present(r: Row) {
     거래대금_억원: r.trdval == null ? null : Math.round(r.trdval / EOK),
     시가총액_억원: r.mktcap == null ? null : Math.round(r.mktcap / EOK),
   }
+}
+
+// Same-day rows come from KIS and are provisional until KRX's official data replaces them the next morning
+async function dataStatus(day: string) {
+  const { data, error } = await supabase.from('available_dates').select('final').eq('bas_dd', day)
+  if (error) throw new Error(error.message)
+  return data?.[0]?.final === false
+    ? {
+        data_status: '잠정치 (provisional)',
+        data_note:
+          'Same-day KIS snapshot. KRX official data replaces it the next morning (~08:00 KST); ' +
+          '거래량/거래대금 may rise slightly (after-hours trading), and 시가총액 uses the previous day\'s 상장주식수.',
+      }
+    : { data_status: '확정치 (KRX official)' }
 }
 
 async function latestDate(): Promise<string | null> {
@@ -293,7 +307,8 @@ const handler = createMcpHandler(() => {
         `sheet1 = 등락률 >= +${SHEET1_MIN_RATE}%; ` +
         `sheet2 = 등락률 >= +${SHEET2_MIN_RATE}% AND 거래대금 >= 500억원, excluding sheet1 stocks; ` +
         'both sorted by 등락률 descending. sheet3 = 일봉/주봉/월봉 chart URLs for every stock in sheet1 and sheet2. ' +
-        'Data is end-of-day from KRX, loaded once KRX publishes it: some time after the close, often only the next morning (by ~08:30 KST). ' +
+        'Data for a trading day is available from ~15:40 KST as a provisional KIS snapshot (data_status = 잠정치), ' +
+        'and is replaced by KRX official data the next morning (~08:00 KST). ' +
         'Omit date to get the latest available trading day. This tool has no news — search the web for why each stock rose.',
       inputSchema: z.object({
         date: z
@@ -326,8 +341,8 @@ const handler = createMcpHandler(() => {
           return json({
             date: day,
             error:
-              'No data for this date. It may be a holiday/weekend, or KRX has not published it yet ' +
-              '(it often appears only the next morning). Call list_available_dates.',
+              'No data for this date. It may be a holiday/weekend, or the day has not closed yet ' +
+              '(data appears from ~15:40 KST). Call list_available_dates.',
           })
         }
       }
@@ -344,6 +359,7 @@ const handler = createMcpHandler(() => {
 
       return json({
         date: day,
+        ...(await dataStatus(day)),
         rules: {
           sheet1: `등락률 >= +${SHEET1_MIN_RATE}%`,
           sheet2: `등락률 >= +${SHEET2_MIN_RATE}% AND 거래대금 >= 500억원, sheet1 제외`,
@@ -481,6 +497,7 @@ const handler = createMcpHandler(() => {
       const { date: _d, limit: _l, ...filters } = a
       return json({
         date: day,
+        ...(await dataStatus(day)),
         filters,
         count: rows.length,
         truncated: rows.length === a.limit,
@@ -558,7 +575,7 @@ const handler = createMcpHandler(() => {
       if (error) throw new Error(error.message)
       const rows = (data ?? []) as Row[]
       if (rows.length === 0) return json({ error: `No data for ${code}${date ? ` on or before ${normDate(date)}` : ''}.` })
-      const result = analyze(rows, opts)
+      const result = { ...analyze(rows, opts), ...(await dataStatus(rows[0].bas_dd)) }
       return json(date && result.date !== normDate(date) ? { note: `No row on ${normDate(date)}; using ${result.date}.`, ...result } : result)
     },
   )
@@ -588,14 +605,16 @@ const handler = createMcpHandler(() => {
     'list_available_dates',
     {
       title: '저장된 거래일 목록',
-      description: 'Trading days available in the database (most recent first).',
+      description:
+        'Trading days available in the database (most recent first). final = false means a provisional same-day ' +
+        'KIS snapshot that KRX official data replaces the next morning.',
       inputSchema: z.object({ limit: z.number().int().min(1).max(100).default(10) }),
       annotations: { readOnlyHint: true },
     },
     async ({ limit }) => {
       const { data, error } = await supabase
         .from('available_dates')
-        .select('bas_dd, row_count')
+        .select('bas_dd, row_count, final')
         .order('bas_dd', { ascending: false })
         .limit(limit)
       if (error) throw new Error(error.message)

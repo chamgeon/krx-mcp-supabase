@@ -1,8 +1,9 @@
 // Pulls KOSPI + KOSDAQ 일별매매정보 from the KRX Open API and stores it in public.daily_prices.
 //
 // Called by pg_cron (see sql/cron.sql). Protected by the x-ingest-secret header.
+// Replaces kis-ingest's same-day provisional rows (source = 'kis') with KRX's official numbers.
 //
-//   POST /functions/v1/krx-ingest                         -> today + any missing weekdays in the last 7 days
+//   POST /functions/v1/krx-ingest                         -> today + any weekday in the last 7 days not yet from KRX
 //   POST /functions/v1/krx-ingest?date=20261008           -> (re)load one day
 //   POST /functions/v1/krx-ingest?from=20260901&to=20261010 -> backfill a range (weekdays only)
 
@@ -83,6 +84,7 @@ async function ingestDay(basDd: string): Promise<number> {
         trdval: num(r.ACC_TRDVAL),
         mktcap: num(r.MKTCAP),
         list_shrs: num(r.LIST_SHRS),
+        source: 'krx',
       })
     }
   }
@@ -93,13 +95,24 @@ async function ingestDay(basDd: string): Promise<number> {
       .upsert(rows.slice(i, i + 1000), { onConflict: 'bas_dd,isu_cd' })
     if (error) throw new Error(`upsert ${basDd}: ${error.message}`)
   }
+  if (rows.length > 0) {
+    // KIS rows KRX didn't overwrite (e.g. a stock delisted that day)
+    const { error } = await supabase
+      .from('daily_prices')
+      .delete()
+      .eq('bas_dd', toIsoDate(basDd))
+      .eq('source', 'kis')
+    if (error) throw new Error(`cleanup ${basDd}: ${error.message}`)
+  }
   return rows.length
 }
 
-async function existingDates(fromIso: string, toIso: string): Promise<Set<string>> {
+// Days whose rows all come from KRX
+async function finalDates(fromIso: string, toIso: string): Promise<Set<string>> {
   const { data, error } = await supabase
     .from('available_dates')
     .select('bas_dd')
+    .eq('final', true)
     .gte('bas_dd', fromIso)
     .lte('bas_dd', toIso)
   if (error) throw new Error(error.message)
@@ -124,11 +137,11 @@ Deno.serve(async (req) => {
       if (!isWeekend(d)) targets.push(ymd(d))
     }
   } else {
-    // Default: any weekday in the last 7 days we don't have yet, plus today (always re-fetched,
-    // so the latest run wins once KRX publishes final numbers)
+    // Default: any weekday in the last 7 days without KRX data yet (missing, or only KIS's provisional
+    // rows), plus today (always re-fetched, so the latest run wins once KRX publishes final numbers)
     const today = todayKst()
     const start = new Date(today.getTime() - 7 * 86400000)
-    const have = await existingDates(toIsoDate(ymd(start)), toIsoDate(ymd(today)))
+    const have = await finalDates(toIsoDate(ymd(start)), toIsoDate(ymd(today)))
     for (let d = start; d < today; d = new Date(d.getTime() + 86400000)) {
       if (!isWeekend(d) && !have.has(ymd(d))) targets.push(ymd(d))
     }
