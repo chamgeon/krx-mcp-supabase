@@ -6,18 +6,19 @@
 //
 //   POST /functions/v1/kis-ingest   -> snapshot today (no-op on weekends and holidays)
 //
+// Runs every 5 minutes during the session and after the close; each run overwrites the day's rows,
+// and as_of records when the snapshot was taken.
+//
 // KIS has no whole-market endpoint, so the stock list comes from the latest stored day, and the
 // fields KIS doesn't return (market, 소속부, 상장주식수) are carried forward from it.
 // 시가총액 = 종가 × carried-forward 상장주식수, which is how KRX computes it.
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2'
+import { kisGet, kisToken, num } from '../_shared/kis.ts'
 
-const KIS_BASE = 'https://openapi.koreainvestment.com:9443'
 const MULTI_MAX = 30 // intstock-multprice: up to 30 stocks per call
 
-const KIS_APP_KEY = Deno.env.get('KIS_APP_KEY')!
-const KIS_APP_SECRET = Deno.env.get('KIS_APP_SECRET')!
 const INGEST_SECRET = Deno.env.get('INGEST_SECRET')!
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL')!,
@@ -33,14 +34,6 @@ type Prev = {
   list_shrs: number | null
 }
 
-function num(v: unknown): number | null {
-  if (v === null || v === undefined) return null
-  const s = String(v).replace(/,/g, '').trim()
-  if (s === '' || s === '-') return null
-  const n = Number(s)
-  return Number.isFinite(n) ? n : null
-}
-
 // Today in Korea as YYYYMMDD
 function todayKst(): string {
   return new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, '')
@@ -49,51 +42,6 @@ function toIsoDate(s: string): string {
   return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-
-// Access tokens last 24h and KIS limits issuance (~1/min), so the token is cached in Postgres.
-async function kisToken(): Promise<string> {
-  const { data, error } = await supabase.from('kis_token').select('*').eq('id', 1).maybeSingle()
-  if (error) throw new Error(`kis_token: ${error.message}`)
-  if (data && new Date(data.expires_at).getTime() - Date.now() > 10 * 60_000) return data.access_token
-
-  const res = await fetch(`${KIS_BASE}/oauth2/tokenP`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ grant_type: 'client_credentials', appkey: KIS_APP_KEY, appsecret: KIS_APP_SECRET }),
-  })
-  if (!res.ok) throw new Error(`KIS token: HTTP ${res.status} ${await res.text()}`)
-  const j = await res.json()
-  const expires_at = new Date(Date.now() + Number(j.expires_in) * 1000).toISOString()
-  const { error: upErr } = await supabase
-    .from('kis_token')
-    .upsert({ id: 1, access_token: j.access_token, expires_at })
-  if (upErr) throw new Error(`kis_token: ${upErr.message}`)
-  return j.access_token
-}
-
-async function kisGet(token: string, path: string, trId: string, params: Record<string, string>) {
-  const url = `${KIS_BASE}${path}?${new URLSearchParams(params)}`
-  for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, {
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        authorization: `Bearer ${token}`,
-        appkey: KIS_APP_KEY,
-        appsecret: KIS_APP_SECRET,
-        tr_id: trId,
-        custtype: 'P',
-      },
-    })
-    const body = await res.json().catch(() => null)
-    if (res.ok && body?.rt_cd === '0') return body
-    // EGW00201 = 초당 거래건수 초과: back off and retry
-    if (body?.msg_cd === 'EGW00201' && attempt < 5) {
-      await sleep(1000)
-      continue
-    }
-    throw new Error(`KIS ${trId}: HTTP ${res.status} ${body?.msg_cd ?? ''} ${body?.msg1 ?? ''}`.trim())
-  }
-}
 
 // The latest trading day KIS knows of (today once the market has opened; earlier on holidays)
 async function latestTradingDay(token: string): Promise<string> {
@@ -132,7 +80,7 @@ async function stocksOf(dayIso: string): Promise<Prev[]> {
   }
 }
 
-async function snapshot(token: string, todayIso: string, prev: Prev[]): Promise<number> {
+async function snapshot(token: string, todayIso: string, asOf: string, prev: Prev[]): Promise<number> {
   const byCode = new Map(prev.map((p) => [p.isu_cd, p]))
   const rows: Record<string, unknown>[] = []
   for (let i = 0; i < prev.length; i += MULTI_MAX) {
@@ -163,6 +111,7 @@ async function snapshot(token: string, todayIso: string, prev: Prev[]): Promise<
         mktcap: close != null && p.list_shrs != null ? close * p.list_shrs : null,
         list_shrs: p.list_shrs,
         source: 'kis',
+        as_of: asOf,
       })
     }
     await sleep(100) // stay well under KIS's 20 calls/s
@@ -181,10 +130,11 @@ Deno.serve(async (req) => {
     return new Response('unauthorized', { status: 401 })
   }
 
+  const asOf = new Date().toISOString()
   const today = todayKst()
   const todayIso = toIsoDate(today)
   try {
-    const token = await kisToken()
+    const token = await kisToken(supabase)
     const latest = await latestTradingDay(token)
     if (latest !== today) {
       return Response.json({ date: today, skipped: `not a trading day (latest is ${latest})` })
@@ -196,8 +146,8 @@ Deno.serve(async (req) => {
     const prev = await previousDay(todayIso)
     if (!prev) throw new Error('no earlier day to take the stock list from')
     const stocks = await stocksOf(prev)
-    const count = await snapshot(token, todayIso, stocks)
-    return Response.json({ date: today, stock_list_from: prev, rows: count })
+    const count = await snapshot(token, todayIso, asOf, stocks)
+    return Response.json({ date: today, as_of: asOf, stock_list_from: prev, rows: count })
   } catch (e) {
     return Response.json({ date: today, error: (e as Error).message }, { status: 500 })
   }

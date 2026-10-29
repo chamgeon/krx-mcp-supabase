@@ -1,17 +1,19 @@
 # krx-mcp-supabase
 
-An MCP server that gives ChatGPT / Claude end-of-day data and quantitative screening for every KOSPI and KOSDAQ stock.
+An MCP server that gives ChatGPT / Claude intraday and end-of-day data and quantitative screening for every KOSPI and
+KOSDAQ stock.
 It runs entirely on the Supabase free plan: scheduled Edge Functions load daily data into Postgres, and a third Edge
 Function serves it over MCP.
 
 ```
-KIS Open API ──(pg_cron, 15:40 / 16:00 / 18:00)──> kis-ingest ─┐  same day, provisional
-                                                               ├─> Postgres ──> mcp ──> ChatGPT / Claude
-KRX Open API ──(pg_cron, next morning)──────────> krx-ingest ─┘  official, replaces KIS rows
+KIS Open API ──(pg_cron, every 5 min + after close)──> kis-ingest ─┐  same day, provisional
+                                                                   ├─> Postgres ──> mcp ──> ChatGPT / Claude
+KRX Open API ──(pg_cron, next morning)──────────────> krx-ingest ─┘  official, replaces KIS rows
 ```
 
-KRX only publishes a trading day's data after the close, often the next morning. So the day is first loaded from the
-한국투자증권 (KIS) Open API right after the close, then replaced with KRX's official numbers once KRX publishes them.
+KRX only publishes a trading day's data after the close, often the next morning. So the current day comes from the
+한국투자증권 (KIS) Open API: a whole-market snapshot every 5 minutes during the session and again after the close. It's
+replaced with KRX's official numbers once KRX publishes them.
 
 All numbers come from SQL and TypeScript over stored data. The LLM is only used on the client side, e.g. to search the
 news for why a stock moved.
@@ -22,7 +24,7 @@ news for why a stock moved.
 |---|---|
 | `get_daily_movers(date?)` | Daily movers report: **sheet1** 등락률 ≥ +15%, **sheet2** 등락률 ≥ +7% and 거래대금 ≥ 500억 (excluding sheet1), both sorted by 등락률, **sheet3** 일봉/주봉/월봉 chart URLs |
 | `screen_stocks(date?, filters…)` | Every stock matching a set of optional filters, with all metrics per row (see below) |
-| `analyze_stock(stock, date?)` | Quantitative profile of one stock plus a list of triggered signals |
+| `analyze_stock(stock, date?)` | Quantitative profile of one stock plus a list of triggered signals; during the session also a live KIS quote |
 | `get_stock_history(code, days)` | Recent daily OHLCV rows for one stock |
 | `find_stock(name)` | 종목명 → 종목코드 |
 | `list_available_dates()` | Trading days loaded in the database |
@@ -157,9 +159,10 @@ If a long range times out, split it into ~1-month chunks.
 
 It schedules:
 
-- **kis-ingest** at 15:40, 16:00 and 18:00 KST on weekdays: a same-day snapshot of every stock (~93 KIS calls,
-  under a minute). The later runs pick up after-hours trading (시간외 종가 / 단일가) and retry a failed run. Holidays are
-  detected through KIS and skipped.
+- **kis-ingest** every 5 minutes from 09:05 to 15:20 KST on weekdays: an intraday snapshot of every stock (~93 KIS
+  calls, under 1.5 minutes). It skips the opening auction and the 15:20–15:30 closing auction.
+- **kis-ingest** at 15:40, 16:00 and 18:00 KST on weekdays: the end-of-day snapshot. The later runs pick up
+  after-hours trading (시간외 종가 / 단일가) and retry a failed run. Holidays are detected through KIS and skipped.
 - **krx-ingest** every 30 minutes from 07:00 to 08:30 KST, daily: replaces the previous day with KRX's official data
   once it's published, and fills in any recent day that's missing or still provisional.
 
@@ -186,10 +189,14 @@ Example prompt:
 ## Notes
 
 - **Provisional vs. official**: `daily_prices.source` is `kis` for same-day rows and `krx` once KRX's data replaces
-  them (`available_dates.final`). The MCP tools return `data_status` (잠정치 / 확정치) so the client knows. KIS has no
+  them (`available_dates.final`). The MCP tools return `data_status` (장중 / 잠정치 / 확정치) so the client knows. KIS has no
   whole-market endpoint, so kis-ingest takes the stock list from the latest stored day and carries forward what KIS
   doesn't return (market, 소속부, 상장주식수); 시가총액 = 종가 × 상장주식수. A stock listed that day is missing until
   KRX's data arrives, and 거래량/거래대금 may rise slightly when it does.
+- **Intraday data**: each snapshot overwrites the day's rows, so intraday history isn't kept and storage doesn't grow.
+  `as_of` records when the snapshot was taken. Mid-session, today's 거래량/거래대금 are partial, so the tools return
+  `session_elapsed` and a warning that spike ratios against full-day averages are understated. `analyze_stock` adds a
+  live quote (one KIS call) while the market is open.
 - **KIS token**: the OAuth access token (valid 24 h) is cached in `public.kis_token` and reused across runs, since KIS
   limits how often a token can be issued.
 - **Security**: the `?key=` in the URL is the only protection on the MCP endpoint, so keep the URL private. The table

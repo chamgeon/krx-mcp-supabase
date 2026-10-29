@@ -3,6 +3,9 @@
 -- First enable the extensions: Database → Extensions → pg_cron and pg_net.
 --
 -- Cron times are UTC (KST = UTC+9):
+--   kis-ingest  09:05–15:20 KST, every 5 min                       Mon–Fri
+--               intraday snapshot. The cron fires 09:00–15:55 KST and the time check inside skips runs
+--               outside 09:05–15:20 (the opening auction and the 15:20–15:30 closing auction).
 --   kis-ingest  15:40, 16:00, 18:00 KST  (06:40, 07:00, 09:00 UTC)  Mon–Fri
 --               same-day provisional snapshot from KIS: 10 min after the 15:30 close, then again after
 --               시간외 종가 (15:40–16:00) and 시간외 단일가 (16:00–18:00); each run overwrites the day,
@@ -14,6 +17,20 @@
 -- Migrating from the KRX-only schedule? Remove the old jobs first:
 --   select cron.unschedule('krx-ingest-close');
 --   select cron.unschedule('krx-ingest-evening');
+
+select cron.schedule(
+  'kis-ingest-intraday',
+  '*/5 0-6 * * 1-5',
+  $$
+  select net.http_post(
+    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/kis-ingest',
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-ingest-secret', '<INGEST_SECRET>'),
+    body := '{}'::jsonb,
+    timeout_milliseconds := 150000
+  )
+  where (now() at time zone 'Asia/Seoul')::time >= '09:05' and (now() at time zone 'Asia/Seoul')::time < '15:21';
+  $$
+);
 
 select cron.schedule(
   'kis-ingest-close',
@@ -56,6 +73,7 @@ select cron.schedule(
 
 -- Check runs:   select * from cron.job_run_details order by start_time desc limit 10;
 -- HTTP results: select * from net._http_response order by created desc limit 10;
--- Remove:       select cron.unschedule('kis-ingest-close');
+-- Remove:       select cron.unschedule('kis-ingest-intraday');
+--               select cron.unschedule('kis-ingest-close');
 --               select cron.unschedule('kis-ingest-after-hours');
 --               select cron.unschedule('krx-ingest-morning');

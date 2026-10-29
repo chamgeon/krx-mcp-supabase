@@ -1,5 +1,6 @@
 // MCP server for the daily KR-stock movers report.
-// Reads only from Postgres (filled by kis-ingest / krx-ingest); never calls KIS or KRX, so their keys stay there.
+// Reads from Postgres (filled by kis-ingest / krx-ingest). The only outside call is a live KIS quote for one
+// stock in analyze_stock during the session.
 //
 // URL to give ChatGPT / Claude:
 //   https://<project-ref>.supabase.co/functions/v1/mcp?key=<MCP_ACCESS_KEY>
@@ -8,6 +9,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createMcpHandler, McpServer } from 'npm:@modelcontextprotocol/server@^2.0.0'
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { z } from 'npm:zod@^4.3.6'
+import { kisGet, kisToken, num, sessionElapsed } from '../_shared/kis.ts'
 
 const MCP_ACCESS_KEY = Deno.env.get('MCP_ACCESS_KEY')!
 const supabase = createClient(
@@ -70,18 +72,60 @@ function present(r: Row) {
   }
 }
 
-// Same-day rows come from KIS and are provisional until KRX's official data replaces them the next morning
+function kstTime(iso: string): string {
+  return new Date(new Date(iso).getTime() + 9 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' KST'
+}
+function todayKstIso(): string {
+  return new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10)
+}
+
+// Same-day rows come from KIS snapshots (every 5 minutes during the session) and are provisional until KRX's
+// official data replaces them the next morning
 async function dataStatus(day: string) {
-  const { data, error } = await supabase.from('available_dates').select('final').eq('bas_dd', day)
+  const { data, error } = await supabase.from('available_dates').select('final, as_of').eq('bas_dd', day)
   if (error) throw new Error(error.message)
-  return data?.[0]?.final === false
-    ? {
-        data_status: '잠정치 (provisional)',
-        data_note:
-          'Same-day KIS snapshot. KRX official data replaces it the next morning (~08:00 KST); ' +
-          '거래량/거래대금 may rise slightly (after-hours trading), and 시가총액 uses the previous day\'s 상장주식수.',
-      }
-    : { data_status: '확정치 (KRX official)' }
+  const d = data?.[0]
+  if (!d || d.final !== false) return { data_status: '확정치 (KRX official)' }
+  const status = {
+    data_status: '잠정치 (provisional)',
+    as_of: d.as_of ? kstTime(d.as_of) : null,
+    data_note:
+      'Same-day KIS snapshot. KRX official data replaces it the next morning (~08:00 KST); ' +
+      '거래량/거래대금 may rise slightly (after-hours trading), and 시가총액 uses the previous day\'s 상장주식수.',
+  }
+  const elapsed = d.as_of ? sessionElapsed(new Date(d.as_of)) : 1
+  if (elapsed >= 1) return status
+  return {
+    ...status,
+    data_status: '장중 (intraday, provisional)',
+    session_elapsed: Math.round(elapsed * 100) / 100,
+    intraday_warning:
+      `Snapshot taken mid-session (${Math.round(elapsed * 100)}% of 09:00–15:30 elapsed). Today's 거래량/거래대금 are ` +
+      'partial, so ratios against prior full-day averages (trdval_ratio, volume_ratio, spikes) are understated, and ' +
+      'today\'s high/low/close can still change. For a rough full-day pace, divide those ratios by session_elapsed.',
+  }
+}
+
+// Live quote for one stock (KIS 주식현재가 시세), used by analyze_stock while the market is open
+async function liveQuote(code: string) {
+  const token = await kisToken(supabase)
+  const { output: o } = await kisGet(token, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+    FID_COND_MRKT_DIV_CODE: 'J',
+    FID_INPUT_ISCD: code,
+  })
+  return {
+    as_of: kstTime(new Date().toISOString()),
+    price: num(o.stck_prpr),
+    change: num(o.prdy_vrss),
+    fluc_rt: num(o.prdy_ctrt),
+    open: num(o.stck_oprc),
+    high: num(o.stck_hgpr),
+    low: num(o.stck_lwpr),
+    volume: num(o.acml_vol),
+    trdval_eok: eok(num(o.acml_tr_pbmn)),
+    mktcap_eok: num(o.hts_avls),
+    vs_prev_day_volume_pct: num(o.prdy_vrss_vol_rate),
+  }
 }
 
 async function latestDate(): Promise<string | null> {
@@ -307,8 +351,9 @@ const handler = createMcpHandler(() => {
         `sheet1 = 등락률 >= +${SHEET1_MIN_RATE}%; ` +
         `sheet2 = 등락률 >= +${SHEET2_MIN_RATE}% AND 거래대금 >= 500억원, excluding sheet1 stocks; ` +
         'both sorted by 등락률 descending. sheet3 = 일봉/주봉/월봉 chart URLs for every stock in sheet1 and sheet2. ' +
-        'Data for a trading day is available from ~15:40 KST as a provisional KIS snapshot (data_status = 잠정치), ' +
-        'and is replaced by KRX official data the next morning (~08:00 KST). ' +
+        'During the session (from 09:05 KST) the current day is a KIS snapshot refreshed every 5 minutes ' +
+        '(data_status = 장중, see as_of); after the close it is the provisional end-of-day snapshot (잠정치), ' +
+        'replaced by KRX official data the next morning (~08:00 KST). ' +
         'Omit date to get the latest available trading day. This tool has no news — search the web for why each stock rose.',
       inputSchema: z.object({
         date: z
@@ -342,7 +387,7 @@ const handler = createMcpHandler(() => {
             date: day,
             error:
               'No data for this date. It may be a holiday/weekend, or the day has not closed yet ' +
-              '(data appears from ~15:40 KST). Call list_available_dates.',
+              '(data appears from ~09:05 KST). Call list_available_dates.',
           })
         }
       }
@@ -541,7 +586,9 @@ const handler = createMcpHandler(() => {
         '1/5/10/20/60/120 days, 거래대금 and 거래량 vs prior averages, recent 거래대금 spikes, MA5/20/60/120 with alignment and 5/20 crosses, ' +
         '20/60/120-day breakouts (close > prior N-day high), volatility (stddev of 등락률, ATR14), up/down streaks, ' +
         'consolidation box and price vs trading value divergence, plus a list of triggered signals. ' +
-        'Metrics needing more history than is loaded are null.',
+        'Metrics needing more history than is loaded are null. ' +
+        'While the market is open (09:00–15:30 KST) it also returns live_quote, a real-time KIS quote; ' +
+        'the analysis itself uses the latest 5-minute snapshot (see as_of).',
       inputSchema: z.object({
         stock: z.string().min(1).describe('6-character 종목코드 (e.g. 005930) or exact/partial 종목명'),
         date: z.string().regex(/^\d{4}-?\d{2}-?\d{2}$/).optional().describe('Analysis date. Omit for the latest day.'),
@@ -575,7 +622,15 @@ const handler = createMcpHandler(() => {
       if (error) throw new Error(error.message)
       const rows = (data ?? []) as Row[]
       if (rows.length === 0) return json({ error: `No data for ${code}${date ? ` on or before ${normDate(date)}` : ''}.` })
-      const result = { ...analyze(rows, opts), ...(await dataStatus(rows[0].bas_dd)) }
+      const result: Record<string, unknown> = { ...analyze(rows, opts), ...(await dataStatus(rows[0].bas_dd)) }
+      const elapsed = sessionElapsed(new Date())
+      if (rows[0].bas_dd === todayKstIso() && elapsed > 0 && elapsed < 1) {
+        try {
+          result.live_quote = await liveQuote(code)
+        } catch (e) {
+          result.live_quote_error = (e as Error).message
+        }
+      }
       return json(date && result.date !== normDate(date) ? { note: `No row on ${normDate(date)}; using ${result.date}.`, ...result } : result)
     },
   )
@@ -614,7 +669,7 @@ const handler = createMcpHandler(() => {
     async ({ limit }) => {
       const { data, error } = await supabase
         .from('available_dates')
-        .select('bas_dd, row_count, final')
+        .select('bas_dd, row_count, final, as_of')
         .order('bas_dd', { ascending: false })
         .limit(limit)
       if (error) throw new Error(error.message)

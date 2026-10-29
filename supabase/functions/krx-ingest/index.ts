@@ -85,6 +85,7 @@ async function ingestDay(basDd: string): Promise<number> {
         mktcap: num(r.MKTCAP),
         list_shrs: num(r.LIST_SHRS),
         source: 'krx',
+        as_of: null,
       })
     }
   }
