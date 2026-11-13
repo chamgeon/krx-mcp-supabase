@@ -79,3 +79,15 @@ What was done and why. Oldest first; new entries go at the bottom.
   total, first and last day plus the latest day's status; with a date it checks that day, or gives the nearest
   trading days around it. **Why:** `limit` was confusing (Claude asked for 100 and reported "100 days" out of 268), and
   the real questions are "how much history?" and "is this day there?".
+
+## 2026-11-13 — Telegram pipeline (public channels)
+- **Done:** public channels are read from the `t.me/s/<name>` web preview (20 posts per page, `?before=` to page
+  back) and stored in `telegram_messages`, tagged with the stocks they mention. **Why:** no Telegram account or
+  API needed, and it runs in the existing Edge Function and cron setup.
+- **Done:** users add channels on demand with `add_telegram_channel`, which checks the preview, backfills ~30 days
+  and returns the latest posts. `telegram-ingest` polls every 10 minutes, and reads refresh a channel if its last poll
+  is over 5 minutes old. **Why:** PBs read different channels, and the answer should be current.
+- **Done:** collection is shared (`telegram_channels`, one row per channel, capped at 50). **Why:** a channel is
+  fetched once however many users follow it. Per-user preferences will only choose which channels a user sees.
+- **Done:** stock tagging matches names of 3+ characters (longest first) and 6-digit codes. **Why:** 2-character
+  names collide with ordinary words.

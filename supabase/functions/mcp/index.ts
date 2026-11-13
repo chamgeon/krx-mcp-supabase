@@ -13,6 +13,7 @@ import { createClient } from 'npm:@supabase/supabase-js@2'
 import { z } from 'npm:zod@^4.3.6'
 import { createRemoteJWKSet, jwtVerify } from 'npm:jose@^5.9.6'
 import { kisGet, kisToken, num, sessionElapsed } from '../_shared/kis.ts'
+import { registerTelegramTools } from './telegram.ts'
 
 const MCP_ACCESS_KEY = Deno.env.get('MCP_ACCESS_KEY')!
 const supabase = createClient(
@@ -369,7 +370,7 @@ function logCall(caller: Caller, tool: string, args: unknown, started: number, r
   const p = supabase.from('tool_calls').insert(row).then(({ error }) => {
     if (error) console.error('tool_calls insert failed:', error.message)
   })
-  if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(p)
+  if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(Promise.resolve(p))
 }
 
 // Wraps server.registerTool so every handler registered on this server is logged.
@@ -780,6 +781,8 @@ const handler = createMcpHandler((ctx) => {
       })
     },
   )
+
+  registerTelegramTools(server, supabase, caller.userId)
 
   return server
 })

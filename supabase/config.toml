@@ -8,3 +8,6 @@ verify_jwt = false
 
 [functions.kis-ingest]
 verify_jwt = false
+
+[functions.telegram-ingest]
+verify_jwt = false
