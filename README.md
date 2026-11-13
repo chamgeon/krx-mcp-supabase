@@ -155,7 +155,7 @@ It schedules:
 
 ### 7. Login (OAuth)
 
-Users log in with Kakao or Google, and Supabase Auth acts as the OAuth 2.1 server for MCP clients. One-time setup:
+Users log in with Google, and Supabase Auth acts as the OAuth 2.1 server for MCP clients. One-time setup:
 
 1. **Consent page.** `web/oauth/consent.html` is where users sign in and approve the connection. Fill in your project
    URL and publishable key at the top of its script. Then, in the GitHub repo, open Settings → Pages and set Source to
@@ -166,11 +166,12 @@ Users log in with Kakao or Google, and Supabase Auth acts as the OAuth 2.1 serve
 3. **Supabase → Authentication → URL Configuration:**
    - Site URL: `https://<owner>.github.io/<repo>`
    - Redirect URLs: add `https://<owner>.github.io/<repo>/oauth/**`
-4. **Supabase → Authentication → Sign In / Providers:**
-   - **Kakao:** create an app at developers.kakao.com and use its REST API key as the client ID, plus a client secret.
-     Set the redirect URI to `https://<PROJECT_REF>.supabase.co/auth/v1/callback`. Supabase asks for `account_email`,
-     which needs a 비즈 앱.
-   - **Google:** create a Google Cloud OAuth client (web application) with the same redirect URI.
+4. **Google login:**
+   - In Google Cloud Console, create a project and an OAuth consent screen: External, basic scopes only, then
+     **Publish app**.
+   - Create an OAuth client (Web application) with the authorized redirect URI
+     `https://<PROJECT_REF>.supabase.co/auth/v1/callback`.
+   - Paste its client ID and secret into Supabase → Authentication → Sign In / Providers → Google.
 
 The MCP function verifies each access token locally against the project's public keys (`/auth/v1/.well-known/jwks.json`).
 

@@ -767,13 +767,17 @@ const AUTH_ISSUER = `${SUPABASE_URL}/auth/v1`
 const MCP_URL = `${SUPABASE_URL}/functions/v1/mcp`
 const RESOURCE_METADATA_URL = `${MCP_URL}/.well-known/oauth-protected-resource`
 const jwks = createRemoteJWKSet(new URL(`${AUTH_ISSUER}/.well-known/jwks.json`))
+// The only scope we ask for: a refresh token, so users don't log in again when the ~1 h access token expires.
+// Without this hint clients request everything Supabase supports (openid profile email phone ...), none of which
+// the server reads; the access token alone identifies the user.
+const SCOPES = ['offline_access']
 
 function unauthorized(reason: string): Response {
   return new Response(JSON.stringify({ error: 'unauthorized', error_description: reason }), {
     status: 401,
     headers: {
       'Content-Type': 'application/json',
-      'WWW-Authenticate': `Bearer resource_metadata="${RESOURCE_METADATA_URL}"`,
+      'WWW-Authenticate': `Bearer resource_metadata="${RESOURCE_METADATA_URL}", scope="${SCOPES.join(' ')}"`,
     },
   })
 }
@@ -788,6 +792,7 @@ Deno.serve(async (req) => {
       resource: MCP_URL,
       authorization_servers: [AUTH_ISSUER],
       bearer_methods_supported: ['header'],
+      scopes_supported: SCOPES,
       resource_name: 'kr-stock-movers',
     })
   }

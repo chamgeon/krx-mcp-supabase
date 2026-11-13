@@ -65,3 +65,13 @@ What was done and why. Oldest first; new entries go at the bottom.
   Edge Functions and Storage as plain text, so the page needs a static host.
 - **Done:** the shared `?key=` URL still works, logged as `shared_key`. **Why:** existing users shouldn't break before
   they reconnect.
+
+## 2026-11-13 — Login tweaks and `available_dates` speed-up
+- **Done:** Google is the only login option; Kakao was dropped. **Why:** simpler setup, and Kakao's email consent item
+  needs a 비즈 앱.
+- **Done:** the server asks only for the `offline_access` scope (in the 401 and in the resource metadata). **Why:**
+  without a hint, clients requested every scope Supabase supports (`openid profile email phone`), and the server
+  reads none of them. `offline_access` gives a refresh token, so users don't log in again every hour.
+- **Done:** a `trading_days` table (one row per KRX day, kept in sync by triggers on `daily_prices`), and
+  `available_dates` reads it plus `live_prices`. **Why:** the view counted all 742k rows on every tool call (~3 s
+  cold, and a 6 s `list_available_dates`).
