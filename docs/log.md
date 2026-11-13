@@ -75,3 +75,7 @@ What was done and why. Oldest first; new entries go at the bottom.
 - **Done:** a `trading_days` table (one row per KRX day, kept in sync by triggers on `daily_prices`), and
   `available_dates` reads it plus `live_prices`. **Why:** the view counted all 742k rows on every tool call (~3 s
   cold, and a 6 s `list_available_dates`).
+- **Done:** replaced `list_available_dates(limit)` with `check_available_dates(date?)`. With no date it returns
+  total, first and last day plus the latest day's status; with a date it checks that day, or gives the nearest
+  trading days around it. **Why:** `limit` was confusing (Claude asked for 100 and reported "100 days" out of 268), and
+  the real questions are "how much history?" and "is this day there?".

@@ -27,7 +27,7 @@ news for why a stock moved.
 | `analyze_stock(stock, date?)` | Quantitative profile of one stock plus a list of triggered signals; during the session also a live KIS quote |
 | `get_stock_history(code, days)` | Recent daily OHLCV rows for one stock |
 | `find_stock(name)` | 종목명 → 종목코드 |
-| `list_available_dates()` | Trading days loaded in the database |
+| `check_available_dates(date?)` | Without a date: total, first and last trading day. With a date: whether it has data (final or provisional), or the nearest trading days around it |
 
 ### `screen_stocks`
 

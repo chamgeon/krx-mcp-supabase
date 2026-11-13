@@ -448,7 +448,7 @@ const handler = createMcpHandler((ctx) => {
             date: day,
             error:
               'No data for this date. It may be a holiday/weekend, or the day has not closed yet ' +
-              '(data appears from ~09:05 KST). Call list_available_dates.',
+              '(data appears from ~09:05 KST). Call check_available_dates.',
           })
         }
       }
@@ -729,23 +729,55 @@ const handler = createMcpHandler((ctx) => {
   )
 
   server.registerTool(
-    'list_available_dates',
+    'check_available_dates',
     {
-      title: '저장된 거래일 목록',
+      title: '거래일 데이터 확인',
       description:
-        'Trading days available in the database (most recent first). final = false means a provisional same-day ' +
-        'KIS snapshot that KRX official data replaces the next morning.',
-      inputSchema: z.object({ limit: z.number().int().min(1).max(100).default(10) }),
+        'Without a date: the range of trading days in the database (total_days, first, last) and the status of the ' +
+        'latest day. With a date: whether that day has data, whether it is final (KRX official) or provisional (same-day ' +
+        'KIS snapshot, replaced by KRX the next morning), and, if the day has no data (weekend, holiday, not loaded), the ' +
+        'nearest trading days before and after it. Use it to resolve "today" / "yesterday" or check a holiday.',
+      inputSchema: z.object({
+        date: z.string().optional().describe('YYYY-MM-DD or YYYYMMDD; omit for the overall range'),
+      }),
       annotations: { readOnlyHint: true },
     },
-    async ({ limit }) => {
-      const { data, error } = await supabase
-        .from('available_dates')
-        .select('bas_dd, row_count, final, as_of')
-        .order('bas_dd', { ascending: false })
-        .limit(limit)
-      if (error) throw new Error(error.message)
-      return json(data ?? [])
+    async ({ date }) => {
+      const dates = () => supabase.from('available_dates').select('bas_dd, row_count')
+
+      if (date) {
+        const day = normDate(date)
+        const [hit, prev, next] = await Promise.all([
+          dates().eq('bas_dd', day),
+          dates().lt('bas_dd', day).order('bas_dd', { ascending: false }).limit(1),
+          dates().gt('bas_dd', day).order('bas_dd', { ascending: true }).limit(1),
+        ])
+        for (const r of [hit, prev, next]) if (r.error) throw new Error(r.error.message)
+        if (hit.data?.length) {
+          return json({ date: day, available: true, stocks: hit.data[0].row_count, ...(await dataStatus(day)) })
+        }
+        return json({
+          date: day,
+          available: false,
+          note: 'No data for this day: a weekend or holiday, outside the loaded range, or today before ~09:05 KST.',
+          previous_trading_day: prev.data?.[0]?.bas_dd ?? null,
+          next_trading_day: next.data?.[0]?.bas_dd ?? null,
+        })
+      }
+
+      const [all, first, last] = await Promise.all([
+        supabase.from('available_dates').select('*', { count: 'exact', head: true }),
+        dates().order('bas_dd', { ascending: true }).limit(1),
+        dates().order('bas_dd', { ascending: false }).limit(1),
+      ])
+      for (const r of [all, first, last]) if (r.error) throw new Error(r.error.message)
+      const lastDay = last.data?.[0]?.bas_dd ?? null
+      return json({
+        total_days: all.count ?? 0,
+        first: first.data?.[0]?.bas_dd ?? null,
+        last: lastDay,
+        ...(lastDay ? await dataStatus(lastDay) : {}),
+      })
     },
   )
 
