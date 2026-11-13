@@ -12,7 +12,7 @@
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2'
-import { loadStockIndex, syncChannel, tagStocks, type SyncResult } from '../_shared/telegram.ts'
+import { loadStockIndex, stockIndex, syncChannel, tagStocks, type SyncResult } from '../_shared/telegram.ts'
 
 const INGEST_SECRET = Deno.env.get('INGEST_SECRET')!
 const supabase = createClient(
@@ -67,11 +67,10 @@ Deno.serve(async (req) => {
     only || c.poll_errors < 3 || !c.last_polled_at || now - new Date(c.last_polled_at).getTime() > FAILING_RETRY_MS
   )
 
-  const idx = await loadStockIndex(supabase)
   const results: SyncResult[] = []
   for (const c of due) {
     if (results.length) await new Promise((r) => setTimeout(r, CHANNEL_PAUSE_MS))
-    results.push(await syncChannel(supabase, c.username, idx))
+    results.push(await syncChannel(supabase, c.username, () => stockIndex(supabase)))
   }
 
   const failed = results.filter((r) => !r.ok)

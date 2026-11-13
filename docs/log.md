@@ -102,3 +102,11 @@ What was done and why. Oldest first; new entries go at the bottom.
   Claude. Shared-`?key=` calls have no user and get a "log in" message.
 - **Done:** stock tagging also counts `ADR`/`GDR` right after a name and `SK 하이닉스`-style spacing. **Why:** real
   posts write `SK하이닉스ADR` and `SK 하이닉스 ADR`.
+- **Done:** the stock-name index loads only when a fetched page has new posts, and is cached per function instance
+  for 6 hours. Posts we already have are upserted without `stock_codes`, so their tags stay. **Why:**
+  `get_telegram_feed` and `update_my_channels` took ~8 s because every refresh reloaded ~2,800 names to re-tag posts
+  that were already tagged.
+- **Done:** `get_telegram_feed` answers from stored posts and refreshes stale channels after the response; the latest
+  trading day is cached per instance; `telegram-ingest` runs every 5 minutes instead of 10. **Why:** the feed still
+  took ~6.6 s, mostly a Telegram fetch (0.5–2 s) plus ~8 sequential queries before answering. Stored posts are at most
+  one cron interval old, which is fresh enough for reading.

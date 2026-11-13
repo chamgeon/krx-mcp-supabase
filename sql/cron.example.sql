@@ -13,7 +13,7 @@
 --   krx-ingest  07:00–08:30 KST          (22:00–23:30 UTC)        daily, every 30 min
 --               KRX official data, published the next morning; replaces the KIS rows. Also fetches any
 --               weekday from the last 7 days that still has no KRX data.
---   telegram-ingest  every 10 min, daily
+--   telegram-ingest  every 5 min, daily
 --               new posts from every collected public Telegram channel (one request per channel).
 --
 -- Migrating from the KRX-only schedule? Remove the old jobs first:
@@ -75,7 +75,7 @@ select cron.schedule(
 
 select cron.schedule(
   'telegram-ingest',
-  '*/10 * * * *',
+  '*/5 * * * *',
   $$
   select net.http_post(
     url := 'https://<PROJECT_REF>.supabase.co/functions/v1/telegram-ingest',

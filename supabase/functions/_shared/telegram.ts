@@ -108,6 +108,17 @@ export function parsePage(html: string, channel: string): TgPage {
 
 export type StockIndex = { names: [string, string][]; codes: Set<string> }
 
+// Cached per function instance: the stock list changes at most once a day, and loading ~2,800 names takes a few
+// round trips. Callers that may not need it (a poll with no new posts) pass stockIndex as a lazy getter.
+const INDEX_TTL_MS = 6 * 3600_000
+let cachedIndex: { idx: StockIndex; at: number } | null = null
+
+export async function stockIndex(supabase: SupabaseClient): Promise<StockIndex> {
+  if (cachedIndex && Date.now() - cachedIndex.at < INDEX_TTL_MS) return cachedIndex.idx
+  cachedIndex = { idx: await loadStockIndex(supabase), at: Date.now() }
+  return cachedIndex.idx
+}
+
 export async function loadStockIndex(supabase: SupabaseClient): Promise<StockIndex> {
   const { data: last, error: e1 } = await supabase
     .from('available_dates').select('bas_dd').order('bas_dd', { ascending: false }).limit(1)
@@ -178,7 +189,7 @@ export type SyncResult = { channel: string; ok: boolean; new_posts: number; page
 export async function syncChannel(
   supabase: SupabaseClient,
   channel: string,
-  idx: StockIndex,
+  getIndex: () => Promise<StockIndex>,
   opts: { sinceTs?: string; maxPages?: number } = {},
 ): Promise<SyncResult> {
   const maxPages = opts.maxPages ?? 5
@@ -197,9 +208,21 @@ export async function syncChannel(
       if (!page) throw new Error('no public preview (channel missing, private, or preview turned off)')
       title ??= page.title
       if (page.posts.length === 0) break
-      const rows = page.posts.map((p) => ({ username: channel, ...p, stock_codes: tagStocks(p.text, idx) }))
-      const { error } = await supabase.from('telegram_messages').upsert(rows, { onConflict: 'username,msg_id' })
-      if (error) throw new Error(`save posts: ${error.message}`)
+      // New posts are tagged (the stock index is only loaded when there are any). Posts we already have just get
+      // their views/text refreshed: leaving stock_codes out of the upsert keeps their existing tags.
+      const fresh = page.posts.filter((p) => p.msg_id > known)
+      const seen = page.posts.filter((p) => p.msg_id <= known)
+      if (fresh.length) {
+        const idx = await getIndex()
+        const rows = fresh.map((p) => ({ username: channel, ...p, stock_codes: tagStocks(p.text, idx) }))
+        const { error } = await supabase.from('telegram_messages').upsert(rows, { onConflict: 'username,msg_id' })
+        if (error) throw new Error(`save posts: ${error.message}`)
+      }
+      if (seen.length) {
+        const rows = seen.map((p) => ({ username: channel, ...p }))
+        const { error } = await supabase.from('telegram_messages').upsert(rows, { onConflict: 'username,msg_id' })
+        if (error) throw new Error(`update posts: ${error.message}`)
+      }
       newPosts += page.posts.filter((p) => p.msg_id > known).length
       newest = Math.max(newest, ...page.posts.map((p) => p.msg_id))
       const oldest = page.posts.reduce((a, p) => (p.msg_id < a.msg_id ? p : a))

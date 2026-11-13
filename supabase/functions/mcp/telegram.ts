@@ -4,12 +4,12 @@
 import type { McpServer } from 'npm:@modelcontextprotocol/server@^2.0.0'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { z } from 'npm:zod@^4.3.6'
-import { channelName, fetchPage, loadStockIndex, syncChannel } from '../_shared/telegram.ts'
+import { channelName, fetchPage, stockIndex, syncChannel } from '../_shared/telegram.ts'
 
 const MAX_CHANNELS = 50 // cap on shared collection, so open adding can't turn the server into a crawler
 const BACKFILL_DAYS = 30
 const BACKFILL_MAX_PAGES = 8 // 20 posts per page
-const STALE_MS = 5 * 60_000 // refresh a channel before reading it if its last poll is older than this
+const STALE_MS = 5 * 60_000 // after a read, refresh (in the background) channels last polled longer ago than this
 
 type Msg = {
   username: string
@@ -24,6 +24,23 @@ type Msg = {
 }
 
 const MSG_COLUMNS = 'username, msg_id, ts, text, views, forwarded_from, has_media, links, stock_codes'
+
+// Latest trading day, cached per function instance for a few minutes (it changes once a day). Used to look up
+// 종목명 for the stock codes in results.
+let latestDay: { day: string | null; at: number } | null = null
+async function latestTradingDay(supabase: SupabaseClient): Promise<string | null> {
+  if (latestDay && Date.now() - latestDay.at < 5 * 60_000) return latestDay.day
+  const { data } = await supabase.from('available_dates').select('bas_dd').order('bas_dd', { ascending: false }).limit(1)
+  latestDay = { day: data?.[0]?.bas_dd ?? null, at: Date.now() }
+  return latestDay.day
+}
+
+// Runs work after the response is sent (Supabase Edge Runtime), so reads never wait for a Telegram fetch.
+declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined
+function inBackground(p: Promise<unknown>) {
+  const safe = p.catch((e) => console.error('background refresh failed:', (e as Error).message))
+  if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(safe)
+}
 
 function json(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 1) }] }
@@ -45,8 +62,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
   async function stockNames(codes: string[]): Promise<Map<string, string>> {
     const uniq = [...new Set(codes)]
     if (!uniq.length) return new Map()
-    const { data: last } = await supabase.from('available_dates').select('bas_dd').order('bas_dd', { ascending: false }).limit(1)
-    const { data } = await supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', last?.[0]?.bas_dd).in('isu_cd', uniq)
+    const { data } = await supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', await latestTradingDay(supabase)).in('isu_cd', uniq)
     return new Map((data ?? []).map((r) => [r.isu_cd, r.isu_nm]))
   }
 
@@ -70,8 +86,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     const { data } = await supabase.from('telegram_channels').select('username, last_polled_at').in('username', channels)
     const stale = (data ?? []).filter((c) => !c.last_polled_at || Date.now() - new Date(c.last_polled_at).getTime() > STALE_MS)
     if (!stale.length) return
-    const idx = await loadStockIndex(supabase)
-    for (const c of stale) await syncChannel(supabase, c.username, idx, { maxPages: 2 })
+    for (const c of stale) await syncChannel(supabase, c.username, () => stockIndex(supabase), { maxPages: 2 })
   }
 
   // Makes sure a channel is collected: a new one is checked (public preview), saved, and backfilled ~30 days; an
@@ -104,9 +119,8 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     } else if (!opts.refresh) {
       return { ok: true, status }
     }
-    const idx = await loadStockIndex(supabase)
     const since = new Date(Date.now() - BACKFILL_DAYS * 86400_000).toISOString()
-    const sync = await syncChannel(supabase, name, idx, { sinceTs: since, maxPages: status === 'already collected' ? 2 : BACKFILL_MAX_PAGES })
+    const sync = await syncChannel(supabase, name, () => stockIndex(supabase), { sinceTs: since, maxPages: status === 'already collected' ? 2 : BACKFILL_MAX_PAGES })
     if (!sync.ok) return { ok: false, error: sync.error ?? 'sync failed' }
     return { ok: true, status: status === 'already collected' ? 'already collected (refreshed)' : status }
   }
@@ -114,8 +128,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
   async function resolveStock(stock: string): Promise<string | null> {
     const s = stock.trim()
     if (/^\d{6}$/.test(s)) return s
-    const { data: last } = await supabase.from('available_dates').select('bas_dd').order('bas_dd', { ascending: false }).limit(1)
-    const { data } = await supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', last?.[0]?.bas_dd).eq('isu_nm', s).limit(1)
+    const { data } = await supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', await latestTradingDay(supabase)).eq('isu_nm', s).limit(1)
     return data?.[0]?.isu_cd ?? null
   }
 
@@ -303,7 +316,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       description:
         'Recent posts from collected public Telegram channels, newest first, with a link to each post and the stocks ' +
         'mentioned (matched by 종목명 or 종목코드). Filter by channel, by stock, and by time. Channels are refreshed ' +
-        'first if their last poll is more than 5 minutes old. Without a channel, shows the channels the user follows ' +
+        'in the background if their last poll is more than 5 minutes old. Without a channel, shows the channels the user follows ' +
         '(get_my_channels), or every collected channel if they follow none or all_channels is true. Use ' +
         'add_telegram_channel to collect a new channel.',
       inputSchema: z.object({
@@ -335,9 +348,9 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
           scopeLabel = 'all collected channels'
         }
       }
-      const toRefresh = scope ?? ((await supabase.from('telegram_channels').select('username').eq('active', true)).data ?? [])
-        .map((c) => c.username)
-      if (toRefresh.length <= 5) await refreshStale(toRefresh)
+      // Answer from stored posts now (telegram-ingest keeps them within one cron interval) and refresh stale channels
+      // after the response, so the next read is fresh without this one waiting on Telegram.
+      if (scope) inBackground(refreshStale(scope))
 
       let code: string | null = null
       if (stock) {

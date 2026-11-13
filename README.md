@@ -158,7 +158,7 @@ It schedules:
   calls, under 1.5 minutes). It skips the opening auction and the 15:20–15:30 closing auction.
 - **kis-ingest** at 15:40, 16:00 and 18:00 KST on weekdays: the end-of-day snapshot. The later runs pick up
   after-hours trading (시간외 종가 / 단일가) and retry a failed run. Holidays are detected through KIS and skipped.
-- **telegram-ingest** every 10 minutes: new posts from every collected Telegram channel.
+- **telegram-ingest** every 5 minutes: new posts from every collected Telegram channel.
 - **krx-ingest** every 30 minutes from 07:00 to 08:30 KST, daily: replaces the previous day with KRX's official data
   once it's published, and fills in any recent day that's missing or still provisional.
 
