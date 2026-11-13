@@ -153,17 +153,42 @@ It schedules:
 - **krx-ingest** every 30 minutes from 07:00 to 08:30 KST, daily: replaces the previous day with KRX's official data
   once it's published, and fills in any recent day that's missing or still provisional.
 
-### 7. Connect a chatbot
+### 7. Login (OAuth)
+
+Users log in with Kakao or Google, and Supabase Auth acts as the OAuth 2.1 server for MCP clients. One-time setup:
+
+1. **Consent page.** `web/oauth/consent.html` is where users sign in and approve the connection. Fill in your project
+   URL and publishable key at the top of its script. Then, in the GitHub repo, open Settings → Pages and set Source to
+   **GitHub Actions**, and push. `.github/workflows/pages.yml` publishes `web/` to
+   `https://<owner>.github.io/<repo>/oauth/consent.html`.
+2. **Supabase → Authentication → OAuth Server:** turn it on, turn on **Allow dynamic OAuth apps** (MCP clients
+   register themselves), and set Authorization path to `/oauth/consent.html`.
+3. **Supabase → Authentication → URL Configuration:**
+   - Site URL: `https://<owner>.github.io/<repo>`
+   - Redirect URLs: add `https://<owner>.github.io/<repo>/oauth/**`
+4. **Supabase → Authentication → Sign In / Providers:**
+   - **Kakao:** create an app at developers.kakao.com and use its REST API key as the client ID, plus a client secret.
+     Set the redirect URI to `https://<PROJECT_REF>.supabase.co/auth/v1/callback`. Supabase asks for `account_email`,
+     which needs a 비즈 앱.
+   - **Google:** create a Google Cloud OAuth client (web application) with the same redirect URI.
+
+The MCP function verifies each access token locally against the project's public keys (`/auth/v1/.well-known/jwks.json`).
+
+### 8. Connect a chatbot
 
 The MCP endpoint (Streamable HTTP) is:
 
 ```
-https://<PROJECT_REF>.supabase.co/functions/v1/mcp?key=<MCP_ACCESS_KEY>
+https://<PROJECT_REF>.supabase.co/functions/v1/mcp
 ```
+
+The client opens the login page the first time it connects.
 
 - **ChatGPT**: Settings → Apps & Connectors → Advanced → enable Developer mode, then create a connector with the URL.
 - **Claude**: Settings → Connectors → Add custom connector.
 - **Testing**: `npx -y @modelcontextprotocol/inspector`
+
+The old shared URL (`…/mcp?key=<MCP_ACCESS_KEY>`) still works during the transition, with no login.
 
 After a tool's parameters change, refresh the connector so the client sees the new schema.
 
@@ -175,7 +200,8 @@ Example prompt:
 
 ## Warnings
 
-- **Keep the MCP URL private.** The `?key=` in it is the only protection on the endpoint.
+- **Keep the shared `?key=` URL private** while it still works. Anyone who has it can call the server without logging
+  in, and their calls are logged as `shared_key`.
 - **Free-plan pause.** Supabase pauses projects that are inactive for 7 days. The daily cron job keeps the project
   active. If it does pause, restore it from the dashboard; the data is kept.
 - **Storage.** A year of history takes ~270 MB of the 500 MB free database, and nothing deletes old rows yet.
@@ -186,3 +212,4 @@ Example prompt:
 
 - [`docs/plan.md`](docs/plan.md): what to build next
 - [`docs/log.md`](docs/log.md): what was done and why
+- Usage: `select * from tool_usage_weekly order by week desc, calls desc;` (one row per tool call in `tool_calls`)

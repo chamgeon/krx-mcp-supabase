@@ -2,13 +2,16 @@
 // Reads from Postgres (filled by kis-ingest / krx-ingest). The only outside call is a live KIS quote for one
 // stock in analyze_stock during the session.
 //
-// URL to give ChatGPT / Claude:
+// URL to give ChatGPT / Claude (users log in with OAuth; see "Auth" at the bottom):
+//   https://<project-ref>.supabase.co/functions/v1/mcp
+// Legacy shared URL, kept during the transition:
 //   https://<project-ref>.supabase.co/functions/v1/mcp?key=<MCP_ACCESS_KEY>
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createMcpHandler, McpServer } from 'npm:@modelcontextprotocol/server@^2.0.0'
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { z } from 'npm:zod@^4.3.6'
+import { createRemoteJWKSet, jwtVerify } from 'npm:jose@^5.9.6'
 import { kisGet, kisToken, num, sessionElapsed } from '../_shared/kis.ts'
 
 const MCP_ACCESS_KEY = Deno.env.get('MCP_ACCESS_KEY')!
@@ -339,8 +342,66 @@ function analyze(
   }
 }
 
-const handler = createMcpHandler(() => {
-  const server = new McpServer({ name: 'kr-stock-movers', version: '0.1.0' })
+// Usage logging: every tool call becomes one row in public.tool_calls. The insert runs after the response
+// (EdgeRuntime.waitUntil), so logging never slows a tool down, and a failed insert never breaks one.
+type Caller = { userId: string | null; auth: 'oauth' | 'shared_key'; client: string | null }
+
+declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined
+
+function logCall(caller: Caller, tool: string, args: unknown, started: number, result: unknown, err?: unknown) {
+  const r = result as { isError?: boolean; content?: { text?: string }[] } | undefined
+  const errorText = err
+    ? String((err as Error)?.message ?? err)
+    : r?.isError
+    ? r.content?.map((c) => c.text ?? '').join(' ').slice(0, 1000)
+    : null
+  const row = {
+    user_id: caller.userId,
+    auth: caller.auth,
+    client: caller.client?.slice(0, 200) ?? null,
+    tool,
+    args: args ?? null,
+    ok: errorText == null,
+    error: errorText,
+    latency_ms: Math.round(performance.now() - started),
+    response_bytes: r?.content ? r.content.reduce((n, c) => n + (c.text?.length ?? 0), 0) : null,
+  }
+  const p = supabase.from('tool_calls').insert(row).then(({ error }) => {
+    if (error) console.error('tool_calls insert failed:', error.message)
+  })
+  if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(p)
+}
+
+// Wraps server.registerTool so every handler registered on this server is logged.
+function withLogging(server: McpServer, caller: Caller): McpServer {
+  // deno-lint-ignore no-explicit-any
+  const register = server.registerTool.bind(server) as (...a: any[]) => any
+  // deno-lint-ignore no-explicit-any
+  ;(server as any).registerTool = (name: string, config: any, cb: (...a: any[]) => Promise<unknown>) =>
+    // deno-lint-ignore no-explicit-any
+    register(name, config, async (...a: any[]) => {
+      // Tools without an inputSchema are called with (ctx) only; the rest with (args, ctx).
+      const args = config?.inputSchema ? a[0] : null
+      const started = performance.now()
+      try {
+        const result = await cb(...a)
+        logCall(caller, name, args, started, result)
+        return result
+      } catch (e) {
+        logCall(caller, name, args, started, undefined, e)
+        throw e
+      }
+    })
+  return server
+}
+
+const handler = createMcpHandler((ctx) => {
+  const caller: Caller = {
+    userId: (ctx.authInfo?.extra?.userId as string | undefined) ?? null,
+    auth: ctx.authInfo?.extra?.userId ? 'oauth' : 'shared_key',
+    client: ctx.requestInfo?.headers.get('user-agent') ?? null,
+  }
+  const server = withLogging(new McpServer({ name: 'kr-stock-movers', version: '0.1.0' }), caller)
 
   server.registerTool(
     'get_daily_movers',
@@ -691,9 +752,65 @@ const handler = createMcpHandler(() => {
   return server
 })
 
-Deno.serve((req) => {
-  // Lightweight protection: secret key in the URL (?key=...). Edge Function MCP has no built-in auth.
-  const key = new URL(req.url).searchParams.get('key')
-  if (key !== MCP_ACCESS_KEY) return new Response('unauthorized', { status: 401 })
-  return handler.fetch(req)
+// ---- Auth ----
+// MCP clients (ChatGPT, Claude) log in with OAuth 2.1, and Supabase Auth is the authorization server:
+//   1. A request without a valid token gets a 401 whose WWW-Authenticate header points to the protected resource
+//      metadata below.
+//   2. The metadata names Supabase Auth as the authorization server; the client registers itself there
+//      (dynamic client registration) and sends the user through login + the consent page (web/oauth/consent.html).
+//   3. The client calls this function with "Authorization: Bearer <access token>", a Supabase user JWT. We verify it
+//      locally against the project's public keys (ES256 JWKS), so no Auth API call per request.
+// The old shared ?key= URL keeps working during the transition and is logged as auth = 'shared_key'.
+
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
+const AUTH_ISSUER = `${SUPABASE_URL}/auth/v1`
+const MCP_URL = `${SUPABASE_URL}/functions/v1/mcp`
+const RESOURCE_METADATA_URL = `${MCP_URL}/.well-known/oauth-protected-resource`
+const jwks = createRemoteJWKSet(new URL(`${AUTH_ISSUER}/.well-known/jwks.json`))
+
+function unauthorized(reason: string): Response {
+  return new Response(JSON.stringify({ error: 'unauthorized', error_description: reason }), {
+    status: 401,
+    headers: {
+      'Content-Type': 'application/json',
+      'WWW-Authenticate': `Bearer resource_metadata="${RESOURCE_METADATA_URL}"`,
+    },
+  })
+}
+
+Deno.serve(async (req) => {
+  const url = new URL(req.url)
+
+  // RFC 9728 protected resource metadata. Clients find it through the WWW-Authenticate header, so it can live under
+  // this function's path (we don't control the domain root).
+  if (url.pathname.endsWith('/.well-known/oauth-protected-resource')) {
+    return Response.json({
+      resource: MCP_URL,
+      authorization_servers: [AUTH_ISSUER],
+      bearer_methods_supported: ['header'],
+      resource_name: 'kr-stock-movers',
+    })
+  }
+
+  // Transition: the shared ?key= URL still works.
+  if (url.searchParams.get('key') === MCP_ACCESS_KEY) return handler.fetch(req)
+
+  const header = req.headers.get('authorization') ?? ''
+  if (!header.toLowerCase().startsWith('bearer ')) return unauthorized('login required')
+  const token = header.slice(7).trim()
+  try {
+    const { payload } = await jwtVerify(token, jwks, { issuer: AUTH_ISSUER })
+    if (!payload.sub || payload.role !== 'authenticated') return unauthorized('not a user token')
+    return handler.fetch(req, {
+      authInfo: {
+        token,
+        clientId: String(payload.client_id ?? ''),
+        scopes: typeof payload.scope === 'string' ? payload.scope.split(' ') : [],
+        expiresAt: payload.exp,
+        extra: { userId: payload.sub },
+      },
+    })
+  } catch (e) {
+    return unauthorized(`invalid token: ${(e as Error).message}`)
+  }
 })

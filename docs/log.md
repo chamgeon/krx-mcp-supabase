@@ -53,3 +53,15 @@ What was done and why. Oldest first; new entries go at the bottom.
   table, and history is written once.
 - **Done:** ran `VACUUM` after the migration. **Why:** after a big batch of writes, index-only scans keep going back to
   the table until a vacuum runs (990 → 236 ms).
+
+## 2026-11-13 — Usage logging and OAuth login
+- **Done:** a `tool_calls` table (user, auth type, client, tool, args, ok/error, latency, size) and a
+  `tool_usage_weekly` view. One wrapper around `registerTool` logs every tool, and the insert runs after the response.
+  **Why:** the go/no-go decisions in the plan need real usage data.
+- **Done:** OAuth 2.1 login with Supabase Auth as the authorization server. The MCP function returns a 401 that points
+  to its protected-resource metadata, and verifies tokens locally against the ES256 JWKS. **Why:** we need per-user
+  identity for logging and preferences, and handing out keys doesn't work for users we don't know.
+- **Done:** the consent page (`web/oauth/consent.html`) is hosted on GitHub Pages. **Why:** Supabase serves HTML from
+  Edge Functions and Storage as plain text, so the page needs a static host.
+- **Done:** the shared `?key=` URL still works, logged as `shared_key`. **Why:** existing users shouldn't break before
+  they reconnect.

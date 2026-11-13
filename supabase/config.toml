@@ -1,4 +1,5 @@
-# All functions do their own auth (secret key / secret header), so the gateway JWT check is off.
+# All functions do their own auth, so the gateway JWT check is off. mcp verifies OAuth access tokens itself (and must
+# answer unauthenticated requests with the 401 that starts the login), the ingest jobs check a secret header.
 [functions.mcp]
 verify_jwt = false
 
