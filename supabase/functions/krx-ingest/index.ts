@@ -158,5 +158,8 @@ Deno.serve(async (req) => {
       if (String(e).includes('429')) break
     }
   }
-  return Response.json({ targets, results })
+  // Non-2xx when any day failed, so the failure shows up in the function logs and net._http_response
+  // instead of hiding behind a 200 (a 401 from an expired KRX key went unnoticed for two weeks this way).
+  const failed = Object.values(results).some((r) => typeof r === 'string')
+  return Response.json({ targets, results }, { status: failed ? 500 : 200 })
 })
