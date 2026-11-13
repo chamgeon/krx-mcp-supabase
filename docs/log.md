@@ -110,3 +110,10 @@ What was done and why. Oldest first; new entries go at the bottom.
   trading day is cached per instance; `telegram-ingest` runs every 5 minutes instead of 10. **Why:** the feed still
   took ~6.6 s, mostly a Telegram fetch (0.5–2 s) plus ~8 sequential queries before answering. Stored posts are at most
   one cron interval old, which is fresh enough for reading.
+
+## 2026-11-13 — Stay on the free plan, add weekly backups
+- **Decided:** no Pro upgrade yet (DB 279 / 500 MB, one logged-in user). Upgrade when PBs come back weekly, the
+  database passes ~400 MB, or a branded Google login is wanted. **Why:** validate demand before spending.
+- **Done:** a weekly GitHub Action dumps `public` (schema + data) and `auth` data, encrypts it with a passphrase, and
+  keeps it 35 days as an artifact. **Why:** the free plan has no backups, and usage logs and user preferences can't be
+  re-fetched from anywhere. Encrypted because the dump holds user emails and tokens.

@@ -1,0 +1,60 @@
+# Weekly encrypted backup of the Supabase database (the free plan has no backups).
+#
+# Dumps the public schema + data and the auth schema's data (users are needed to restore user_channels / tool_calls),
+# encrypts the bundle with BACKUP_PASSPHRASE (AES-256; the dump contains user emails and tokens), and keeps it as a
+# workflow artifact for 35 days (~5 weekly backups).
+#
+# Repo secrets (Settings → Secrets and variables → Actions):
+#   SUPABASE_DB_URL     Dashboard → Connect → Session pooler connection string, with the database password filled in
+#   BACKUP_PASSPHRASE   a long random string; keep a copy in your password manager, or the backups can't be opened
+#
+# Restore: see "Backups" in README.md.
+name: backup
+
+on:
+  schedule:
+    - cron: '0 18 * * 0' # Mondays 03:00 KST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Dump database
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          mkdir dump
+          supabase db dump --db-url "$SUPABASE_DB_URL" --schema public -f dump/schema.sql
+          supabase db dump --db-url "$SUPABASE_DB_URL" --schema public --data-only --use-copy -f dump/data.sql
+          supabase db dump --db-url "$SUPABASE_DB_URL" --schema auth --data-only --use-copy -f dump/auth_data.sql
+          ls -la dump
+
+      - name: Encrypt
+        env:
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "$BACKUP_PASSPHRASE" || { echo "BACKUP_PASSPHRASE is not set"; exit 1; }
+          name="db-$(date -u +%Y-%m-%d)"
+          tar czf - -C dump . | gpg --batch --yes --symmetric --cipher-algo AES256 \
+            --passphrase-fd 3 3<<<"$BACKUP_PASSPHRASE" -o "$name.tar.gz.gpg"
+          rm -rf dump
+          ls -la "$name.tar.gz.gpg"
+          echo "NAME=$name" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ env.NAME }}.tar.gz.gpg
+          retention-days: 35
+          compression-level: 0 # already compressed and encrypted

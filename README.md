@@ -208,6 +208,30 @@ Example prompt:
 > Sheet 1/2는 툴 결과 그대로 쓰고, 각 종목마다 웹 검색으로 "왜 올랐는지"를 상세하게 적어줘
 > (재료/뉴스, 공시, 테마, 수급). Sheet 3에는 차트 URL을 넣어줘.
 
+## Backups
+
+The free plan has no backups, so `.github/workflows/backup.yml` runs every Monday at 03:00 KST (or by hand: Actions →
+**backup** → Run workflow). It dumps the `public` schema and data plus the `auth` users, encrypts the bundle, and keeps
+it as a workflow artifact for 35 days.
+
+One-time setup, in the GitHub repo → Settings → Secrets and variables → Actions:
+- `SUPABASE_DB_URL`: Supabase Dashboard → Connect → **Session pooler** connection string, with the database password
+  filled in. Percent-encode special characters in the password.
+- `BACKUP_PASSPHRASE`: a long random string (e.g. `openssl rand -base64 32`). Keep a copy in your password manager;
+  without it the backups can't be opened.
+
+Restore into a new project (`$DB_URL` = its connection string):
+
+```bash
+gpg -d db-YYYY-MM-DD.tar.gz.gpg | tar xz -C restore/
+psql "$DB_URL" -v ON_ERROR_STOP=1 -f restore/schema.sql
+psql "$DB_URL" -v ON_ERROR_STOP=1 --single-transaction -c 'SET session_replication_role = replica' \
+  -f restore/auth_data.sql -f restore/data.sql
+```
+
+`session_replication_role = replica` skips triggers and foreign-key checks while loading, so table order doesn't
+matter. Then redeploy the Edge Functions, set the secrets, and recreate the cron jobs (Setup steps 3–6).
+
 ## Warnings
 
 - **Keep the shared `?key=` URL private** while it still works. Anyone who has it can call the server without logging
