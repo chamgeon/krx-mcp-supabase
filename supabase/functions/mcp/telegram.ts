@@ -74,6 +74,43 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     for (const c of stale) await syncChannel(supabase, c.username, idx, { maxPages: 2 })
   }
 
+  // Makes sure a channel is collected: a new one is checked (public preview), saved, and backfilled ~30 days; an
+  // inactive one is reactivated. With refresh, an existing channel is also polled now.
+  async function ensureChannel(
+    name: string,
+    opts: { refresh: boolean },
+  ): Promise<{ ok: true; status: string } | { ok: false; error: string }> {
+    const { data: existing } = await supabase.from('telegram_channels').select('username, active').eq('username', name)
+    let status = 'already collected'
+    if (!existing?.length) {
+      const { count } = await supabase.from('telegram_channels').select('*', { count: 'exact', head: true }).eq('active', true)
+      if ((count ?? 0) >= MAX_CHANNELS) {
+        return { ok: false, error: `the collection limit (${MAX_CHANNELS} channels) is reached; ask the operator to raise it` }
+      }
+      const page = await fetchPage(name)
+      if (!page) {
+        return {
+          ok: false,
+          error: `t.me/${name} has no public web preview: it doesn't exist, is private, or the owner turned the preview ` +
+            'off. Only public channels can be collected.',
+        }
+      }
+      const { error } = await supabase.from('telegram_channels').insert({ username: name, title: page.title, added_by: userId })
+      if (error) throw new Error(error.message)
+      status = 'added'
+    } else if (!existing[0].active) {
+      await supabase.from('telegram_channels').update({ active: true, poll_errors: 0 }).eq('username', name)
+      status = 'reactivated'
+    } else if (!opts.refresh) {
+      return { ok: true, status }
+    }
+    const idx = await loadStockIndex(supabase)
+    const since = new Date(Date.now() - BACKFILL_DAYS * 86400_000).toISOString()
+    const sync = await syncChannel(supabase, name, idx, { sinceTs: since, maxPages: status === 'already collected' ? 2 : BACKFILL_MAX_PAGES })
+    if (!sync.ok) return { ok: false, error: sync.error ?? 'sync failed' }
+    return { ok: true, status: status === 'already collected' ? 'already collected (refreshed)' : status }
+  }
+
   async function resolveStock(stock: string): Promise<string | null> {
     const s = stock.trim()
     if (/^\d{6}$/.test(s)) return s
@@ -96,30 +133,9 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     async ({ channel }) => {
       const name = channelName(channel)
       if (!name) return json({ error: `Not a valid Telegram channel name: ${channel}` })
-
-      const { data: existing } = await supabase.from('telegram_channels').select('username, active').eq('username', name)
-      if (!existing?.length) {
-        const { count } = await supabase.from('telegram_channels').select('*', { count: 'exact', head: true }).eq('active', true)
-        if ((count ?? 0) >= MAX_CHANNELS) {
-          return json({ error: `The collection limit (${MAX_CHANNELS} channels) is reached. Ask the operator to raise it.` })
-        }
-        const page = await fetchPage(name)
-        if (!page) {
-          return json({
-            error: `t.me/${name} has no public web preview: it doesn't exist, is private, or the owner turned the ` +
-              'preview off. Only public channels can be collected.',
-          })
-        }
-        const { error } = await supabase.from('telegram_channels').insert({ username: name, title: page.title, added_by: userId })
-        if (error) throw new Error(error.message)
-      } else if (!existing[0].active) {
-        await supabase.from('telegram_channels').update({ active: true, poll_errors: 0 }).eq('username', name)
-      }
-
-      const idx = await loadStockIndex(supabase)
-      const since = new Date(Date.now() - BACKFILL_DAYS * 86400_000).toISOString()
-      const sync = await syncChannel(supabase, name, idx, { sinceTs: since, maxPages: BACKFILL_MAX_PAGES })
-      if (!sync.ok) return json({ channel: name, error: sync.error })
+      const r = await ensureChannel(name, { refresh: true })
+      if (!r.ok) return json({ channel: name, error: r.error })
+      const followed = await follow([name])
 
       const [{ data: ch }, { count }, { data: latest }] = await Promise.all([
         supabase.from('telegram_channels').select('title').eq('username', name).single(),
@@ -129,9 +145,128 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       return json({
         channel: name,
         title: ch?.title ?? null,
-        status: existing?.length ? 'already collected (refreshed)' : 'added',
+        status: r.status,
+        ...(followed ? { followed_by_you: true } : { note: 'Log in (OAuth) to follow channels; the shared URL has no user.' }),
         posts_stored: count ?? 0,
         latest_posts: await present((latest ?? []) as Msg[], 600),
+      })
+    },
+  )
+
+  // ---- Per-user channel preferences (user_channels) ----
+
+  const LOGIN_REQUIRED = {
+    error: 'Channel preferences need a logged-in user. This connection uses the shared ?key= URL; reconnect with ' +
+      'the plain MCP URL and sign in with Google.',
+  }
+
+  async function follow(names: string[]): Promise<boolean> {
+    if (!userId || !names.length) return false
+    const { error } = await supabase.from('user_channels')
+      .upsert(names.map((username) => ({ user_id: userId, username })), { onConflict: 'user_id,username', ignoreDuplicates: true })
+    if (error) throw new Error(error.message)
+    return true
+  }
+
+  async function myChannels(): Promise<string[]> {
+    if (!userId) return []
+    const { data, error } = await supabase.from('user_channels').select('username').eq('user_id', userId)
+    if (error) throw new Error(error.message)
+    return (data ?? []).map((r) => r.username)
+  }
+
+  async function myChannelsView() {
+    const names = await myChannels()
+    if (!names.length) return { channels: [], note: 'You follow no channels yet; get_telegram_feed shows all channels.' }
+    const { data, error } = await supabase.from('telegram_channel_stats').select('*').in('username', names)
+    if (error) throw new Error(error.message)
+    return {
+      channels: (data ?? []).map((c) => ({
+        channel: c.username,
+        title: c.title,
+        link: `https://t.me/${c.username}`,
+        posts: c.posts,
+        last_post: c.last_post ? kst(c.last_post) : null,
+        ...(c.last_error ? { error: c.last_error } : {}),
+      })),
+    }
+  }
+
+  // Validates names, collects channels that aren't collected yet. Returns the ones that are usable and the failures.
+  async function prepare(inputs: string[]) {
+    const ok: string[] = []
+    const failed: { channel: string; error: string }[] = []
+    for (const input of inputs) {
+      const name = channelName(input)
+      if (!name) { failed.push({ channel: input, error: 'not a valid Telegram channel name' }); continue }
+      if (ok.includes(name)) continue
+      const r = await ensureChannel(name, { refresh: false })
+      if (r.ok) ok.push(name)
+      else failed.push({ channel: name, error: r.error })
+    }
+    return { ok, failed }
+  }
+
+  server.registerTool(
+    'get_my_channels',
+    {
+      title: '내 텔레그램 채널',
+      description:
+        "The Telegram channels the current user follows (their default for get_telegram_feed), with post counts and " +
+        'the latest post time. Preferences belong to the logged-in Google account, so they are the same in ChatGPT and ' +
+        'Claude.',
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    async () => (userId ? json(await myChannelsView()) : json(LOGIN_REQUIRED)),
+  )
+
+  server.registerTool(
+    'set_my_channels',
+    {
+      title: '내 텔레그램 채널 설정',
+      description:
+        "Replaces the current user's followed Telegram channels with exactly this list (an empty list clears it). " +
+        'Channels not collected yet are added first (public channels with a t.me/s preview only). To add or remove a ' +
+        'few, use update_my_channels instead.',
+      inputSchema: z.object({ channels: z.array(z.string()).max(50).describe('@name, name, or t.me links') }),
+    },
+    async ({ channels }) => {
+      if (!userId) return json(LOGIN_REQUIRED)
+      const { ok, failed } = await prepare(channels)
+      const { error } = await supabase.from('user_channels').delete().eq('user_id', userId)
+      if (error) throw new Error(error.message)
+      await follow(ok)
+      return json({ ...(await myChannelsView()), ...(failed.length ? { not_added: failed } : {}) })
+    },
+  )
+
+  server.registerTool(
+    'update_my_channels',
+    {
+      title: '내 텔레그램 채널 추가/삭제',
+      description:
+        "Adds and/or removes Telegram channels from the current user's followed list. Channels not collected yet are " +
+        'added first (public channels only). Removing a channel only unfollows it; collection continues for others.',
+      inputSchema: z.object({
+        add: z.array(z.string()).max(50).optional().describe('channels to follow (@name, name, or t.me links)'),
+        remove: z.array(z.string()).max(50).optional().describe('channels to unfollow'),
+      }),
+    },
+    async ({ add, remove }) => {
+      if (!userId) return json(LOGIN_REQUIRED)
+      const { ok, failed } = await prepare(add ?? [])
+      await follow(ok)
+      const drop = (remove ?? []).map(channelName).filter((n): n is string => !!n)
+      if (drop.length) {
+        const { error } = await supabase.from('user_channels').delete().eq('user_id', userId).in('username', drop)
+        if (error) throw new Error(error.message)
+      }
+      return json({
+        ...(await myChannelsView()),
+        ...(ok.length ? { followed: ok } : {}),
+        ...(drop.length ? { unfollowed: drop } : {}),
+        ...(failed.length ? { not_added: failed } : {}),
       })
     },
   )
@@ -168,9 +303,12 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       description:
         'Recent posts from collected public Telegram channels, newest first, with a link to each post and the stocks ' +
         'mentioned (matched by 종목명 or 종목코드). Filter by channel, by stock, and by time. Channels are refreshed ' +
-        'first if their last poll is more than 5 minutes old. Use add_telegram_channel to collect a new channel.',
+        'first if their last poll is more than 5 minutes old. Without a channel, shows the channels the user follows ' +
+        '(get_my_channels), or every collected channel if they follow none or all_channels is true. Use ' +
+        'add_telegram_channel to collect a new channel.',
       inputSchema: z.object({
-        channel: z.string().optional().describe('one channel (@name, name, or t.me link); omit for all channels'),
+        channel: z.string().optional().describe("one channel (@name, name, or t.me link); omit for the user's channels"),
+        all_channels: z.boolean().default(false).describe("every collected channel, not just the user's"),
         stock: z.string().optional().describe('종목코드 or exact 종목명: only posts mentioning it'),
         since: z.string().optional().describe('YYYY-MM-DD (KST) or ISO time; default: 3 days ago'),
         limit: z.number().int().min(1).max(100).default(20),
@@ -178,17 +316,28 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ channel, stock, since, limit, max_chars }) => {
+    async ({ channel, all_channels, stock, since, limit, max_chars }) => {
       const name = channel ? channelName(channel) : null
       if (channel && !name) return json({ error: `Not a valid Telegram channel name: ${channel}` })
+      let scope: string[] | null = null // null = every channel
+      let scopeLabel: string
       if (name) {
         const { data } = await supabase.from('telegram_channels').select('username').eq('username', name)
         if (!data?.length) return json({ error: `t.me/${name} isn't collected yet. Call add_telegram_channel first.` })
-        await refreshStale([name])
+        scope = [name]
+        scopeLabel = name
       } else {
-        const { data } = await supabase.from('telegram_channels').select('username').eq('active', true)
-        if ((data?.length ?? 0) <= 5) await refreshStale((data ?? []).map((c) => c.username))
+        const mine = all_channels ? [] : await myChannels()
+        if (mine.length) {
+          scope = mine
+          scopeLabel = `your channels (${mine.length})`
+        } else {
+          scopeLabel = 'all collected channels'
+        }
       }
+      const toRefresh = scope ?? ((await supabase.from('telegram_channels').select('username').eq('active', true)).data ?? [])
+        .map((c) => c.username)
+      if (toRefresh.length <= 5) await refreshStale(toRefresh)
 
       let code: string | null = null
       if (stock) {
@@ -197,11 +346,11 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       }
 
       let q = supabase.from('telegram_messages').select(MSG_COLUMNS).gte('ts', sinceIso(since, 3))
-      if (name) q = q.eq('username', name)
+      if (scope) q = q.in('username', scope)
       if (code) q = q.contains('stock_codes', [code])
       const { data, error } = await q.order('ts', { ascending: false }).limit(limit)
       if (error) throw new Error(error.message)
-      return json({ count: data?.length ?? 0, posts: await present((data ?? []) as Msg[], max_chars) })
+      return json({ scope: scopeLabel, count: data?.length ?? 0, posts: await present((data ?? []) as Msg[], max_chars) })
     },
   )
 

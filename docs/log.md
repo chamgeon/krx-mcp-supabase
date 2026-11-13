@@ -91,3 +91,14 @@ What was done and why. Oldest first; new entries go at the bottom.
   fetched once however many users follow it. Per-user preferences will only choose which channels a user sees.
 - **Done:** stock tagging matches names of 3+ characters (longest first) and 6-digit codes. **Why:** 2-character
   names collide with ordinary words.
+
+## 2026-11-13 — Per-user channel preferences
+- **Done:** `user_channels(user_id, username)` and three tools: `get_my_channels`, `set_my_channels` (replace the
+  list), `update_my_channels` (add/remove). Following an uncollected channel collects it first, and adding a channel
+  follows it. **Why:** PBs read different channels; collection stays shared, and preferences only choose the feed.
+- **Done:** `get_telegram_feed` without a channel shows the user's channels (`all_channels` for everything; all
+  channels if they follow none). **Why:** the feed should default to what the user cares about.
+- Preferences are keyed by the Supabase Auth user, so the same Google account sees the same list in ChatGPT and
+  Claude. Shared-`?key=` calls have no user and get a "log in" message.
+- **Done:** stock tagging also counts `ADR`/`GDR` right after a name and `SK 하이닉스`-style spacing. **Why:** real
+  posts write `SK하이닉스ADR` and `SK 하이닉스 ADR`.

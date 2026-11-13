@@ -30,8 +30,11 @@ news for why a stock moved.
 | `check_available_dates(date?)` | Without a date: total, first and last trading day. With a date: whether it has data (final or provisional), or the nearest trading days around it |
 | `add_telegram_channel(channel)` | Starts collecting a public Telegram channel (needs a `t.me/s/<name>` preview), backfills ~30 days, returns the latest posts |
 | `list_telegram_channels()` | Collected channels with post counts, latest post and poll status |
-| `get_telegram_feed(channel?, stock?, since?)` | Recent posts, newest first, with links and the stocks they mention |
+| `get_telegram_feed(channel?, stock?, since?, all_channels?)` | Recent posts from the user's channels (or all), newest first, with links and the stocks they mention |
 | `search_telegram(query, channel?, since?)` | Posts containing all the words, with a snippet and link |
+| `get_my_channels()` | Channels the logged-in user follows (their default feed) |
+| `set_my_channels(channels)` | Replaces the user's followed channels; collects new ones first |
+| `update_my_channels(add?, remove?)` | Follows / unfollows channels |
 
 ### `screen_stocks`
 
