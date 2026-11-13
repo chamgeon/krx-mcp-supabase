@@ -1,6 +1,7 @@
 // Same-day snapshot of every KOSPI + KOSDAQ stock from the KIS (한국투자증권) Open API, stored in
-// public.daily_prices with source = 'kis'. krx-ingest overwrites the day with KRX's official numbers
-// the next morning.
+// public.live_prices (source = 'kis'). krx-ingest writes the day's official KRX numbers to daily_prices
+// the next morning and clears it from live_prices. Readers use the public.prices view, which combines both.
+// Rewriting rows every 5 minutes happens only in the small live_prices table, so daily_prices's indexes don't bloat.
 //
 // Called by pg_cron (see sql/cron.sql). Protected by the x-ingest-secret header.
 //
@@ -69,7 +70,7 @@ async function stocksOf(dayIso: string): Promise<Prev[]> {
   const out: Prev[] = []
   for (let from = 0; ; from += 1000) {
     const { data, error } = await supabase
-      .from('daily_prices')
+      .from('prices') // the previous day may still be KIS-only if KRX hasn't published it
       .select('isu_cd, isu_nm, market, sect_tp_nm, list_shrs')
       .eq('bas_dd', dayIso)
       .order('isu_cd')
@@ -118,7 +119,7 @@ async function snapshot(token: string, todayIso: string, asOf: string, prev: Pre
   }
   for (let i = 0; i < rows.length; i += 1000) {
     const { error } = await supabase
-      .from('daily_prices')
+      .from('live_prices')
       .upsert(rows.slice(i, i + 1000), { onConflict: 'bas_dd,isu_cd' })
     if (error) throw new Error(`upsert ${todayIso}: ${error.message}`)
   }

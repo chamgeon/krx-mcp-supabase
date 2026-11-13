@@ -97,12 +97,12 @@ async function ingestDay(basDd: string): Promise<number> {
     if (error) throw new Error(`upsert ${basDd}: ${error.message}`)
   }
   if (rows.length > 0) {
-    // KIS rows KRX didn't overwrite (e.g. a stock delisted that day)
+    // The day is official now: drop kis-ingest's provisional rows for it. (The prices view already hides
+    // them once daily_prices has the day; this just keeps live_prices small.)
     const { error } = await supabase
-      .from('daily_prices')
+      .from('live_prices')
       .delete()
       .eq('bas_dd', toIsoDate(basDd))
-      .eq('source', 'kis')
     if (error) throw new Error(`cleanup ${basDd}: ${error.message}`)
   }
   return rows.length

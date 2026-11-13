@@ -60,19 +60,6 @@ Accepts a 종목코드 or a name, and returns:
 
 Triggered conditions come back as a `signals` list (`TRDVAL_SPIKE`, `BREAKOUT_120D`, `BOX_WITH_RISING_TRDVAL`, …).
 
-### Implementation notes
-
-- **Untraded days.** KRX reports a stock that didn't trade (a trading halt, or simply no trades) with open/high/low = 0
-  and the previous close carried forward. Those zeros are treated as missing values, and a stock without trades on the
-  analysis date is never a breakout. Screens leave such stocks out unless `include_untraded` is set.
-- **Performance.** PostgREST cancels queries after 8 s, and the free-plan database is small. The screener reads a
-  covering index on `(bas_dd, isu_cd)` through a materialized CTE, so it's one sequential range read instead of
-  ~360k random heap fetches. Per-stock window functions only run over the short window (~21 trading days). The
-  60/120-day highs come from a plain grouped `max`, computed only when a 60/120-day breakout is requested.
-  A full-market screen takes about 0.2–0.5 s.
-- **History.** Windows count trading days, so 120-day metrics need about 6 months of loaded data. Anything without
-  enough history comes back `null`.
-
 ## Setup
 
 ### 1. API keys
@@ -186,29 +173,16 @@ Example prompt:
 > Sheet 1/2는 툴 결과 그대로 쓰고, 각 종목마다 웹 검색으로 "왜 올랐는지"를 상세하게 적어줘
 > (재료/뉴스, 공시, 테마, 수급). Sheet 3에는 차트 URL을 넣어줘.
 
-## Notes
+## Warnings
 
-- **Provisional vs. official**: `daily_prices.source` is `kis` for same-day rows and `krx` once KRX's data replaces
-  them (`available_dates.final`). The MCP tools return `data_status` (장중 / 잠정치 / 확정치) so the client knows. KIS has no
-  whole-market endpoint, so kis-ingest takes the stock list from the latest stored day and carries forward what KIS
-  doesn't return (market, 소속부, 상장주식수); 시가총액 = 종가 × 상장주식수. A stock listed that day is missing until
-  KRX's data arrives, and 거래량/거래대금 may rise slightly when it does.
-- **Intraday data**: each snapshot overwrites the day's rows, so intraday history isn't kept and storage doesn't grow.
-  `as_of` records when the snapshot was taken. Mid-session, today's 거래량/거래대금 are partial, so the tools return
-  `session_elapsed` and a warning that spike ratios against full-day averages are understated. `analyze_stock` adds a
-  live quote (one KIS call) while the market is open.
-- **KIS token**: the OAuth access token (valid 24 h) is cached in `public.kis_token` and reused across runs, since KIS
-  limits how often a token can be issued.
-- **Security**: the `?key=` in the URL is the only protection on the MCP endpoint, so keep the URL private. The table
-  has RLS enabled with no policies, and only the service role (used by the Edge Functions) can read it or run
-  `screen_stocks`.
-- **Charts**: chart URLs point to Naver Finance images (unofficial). They always show the current chart, not the chart
-  as of the requested date.
-- **Storage** ⚠️: ~2,700 rows per trading day come to ~1 MB including indexes, so a year of history takes ~265 MB
-  and the 500 MB free database fills up in under two years (as of 2026-10-29: 276 MB used, ~10 months left).
-  Nothing deletes old rows yet. Options: a retention job that drops rows older than ~14 months (enough for the
-  120-day metrics and `analyze_stock`'s 250-row window), and dropping `daily_prices_date_rate_idx` (31 MB, rarely
-  used).
-- **Free-plan pause**: projects inactive for 7 days are paused. The daily cron keeps it active; if it does pause,
-  restore it from the dashboard and the data is kept.
-- **Report thresholds** (`SHEET1_MIN_RATE` etc.) are constants at the top of `supabase/functions/mcp/index.ts`.
+- **Keep the MCP URL private.** The `?key=` in it is the only protection on the endpoint.
+- **Free-plan pause.** Supabase pauses projects that are inactive for 7 days. The daily cron job keeps the project
+  active. If it does pause, restore it from the dashboard; the data is kept.
+- **Storage.** A year of history takes ~270 MB of the 500 MB free database, and nothing deletes old rows yet.
+- **KRX key expires yearly.** When it does, `krx-ingest` fails with 401 and the days stay provisional (KIS data). Renew
+  it at openapi.krx.co.kr, then backfill with `?from=…&to=…`.
+
+## Docs
+
+- [`docs/plan.md`](docs/plan.md): what to build next
+- [`docs/log.md`](docs/log.md): what was done and why

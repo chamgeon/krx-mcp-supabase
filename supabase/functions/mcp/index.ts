@@ -130,7 +130,7 @@ async function liveQuote(code: string) {
 
 async function latestDate(): Promise<string | null> {
   const { data, error } = await supabase
-    .from('daily_prices')
+    .from('prices')
     .select('bas_dd')
     .order('bas_dd', { ascending: false })
     .limit(1)
@@ -369,7 +369,7 @@ const handler = createMcpHandler(() => {
       if (!day) return json({ error: 'No data ingested yet.' })
 
       const { data, error } = await supabase
-        .from('daily_prices')
+        .from('prices')
         .select('*')
         .eq('bas_dd', day)
         .gte('fluc_rt', SHEET2_MIN_RATE)
@@ -379,7 +379,7 @@ const handler = createMcpHandler(() => {
       const rows = (data ?? []) as Row[]
       if (rows.length === 0) {
         const { count } = await supabase
-          .from('daily_prices')
+          .from('prices')
           .select('*', { count: 'exact', head: true })
           .eq('bas_dd', day)
         if (!count) {
@@ -434,7 +434,7 @@ const handler = createMcpHandler(() => {
     },
     async ({ code, days }) => {
       const { data, error } = await supabase
-        .from('daily_prices')
+        .from('prices')
         .select('*')
         .eq('isu_cd', code)
         .order('bas_dd', { ascending: false })
@@ -614,7 +614,7 @@ const handler = createMcpHandler(() => {
       let code = stock.trim()
       if (!/^[0-9A-Z]{6}$/i.test(code)) {
         const { data, error } = await supabase
-          .from('daily_prices')
+          .from('prices')
           .select('isu_cd, isu_nm, market')
           .eq('bas_dd', await latestDate())
           .ilike('isu_nm', `%${code}%`)
@@ -627,7 +627,7 @@ const handler = createMcpHandler(() => {
       }
       code = code.toUpperCase()
 
-      let q = supabase.from('daily_prices').select('*').eq('isu_cd', code)
+      let q = supabase.from('prices').select('*').eq('isu_cd', code)
       if (date) q = q.lte('bas_dd', normDate(date))
       const { data, error } = await q.order('bas_dd', { ascending: false }).limit(250)
       if (error) throw new Error(error.message)
@@ -657,7 +657,7 @@ const handler = createMcpHandler(() => {
     async ({ name }) => {
       const day = await latestDate()
       const { data, error } = await supabase
-        .from('daily_prices')
+        .from('prices')
         .select('isu_cd, isu_nm, market')
         .eq('bas_dd', day)
         .ilike('isu_nm', `%${name}%`)
