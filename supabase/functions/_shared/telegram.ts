@@ -123,21 +123,27 @@ export async function loadStockIndex(supabase: SupabaseClient): Promise<StockInd
   const { data: last, error: e1 } = await supabase
     .from('available_dates').select('bas_dd').order('bas_dd', { ascending: false }).limit(1)
   if (e1) throw new Error(e1.message)
-  const names: [string, string][] = []
-  const codes = new Set<string>()
+  const stocks: { isu_cd: string; isu_nm: string }[] = []
   for (let from = 0; ; from += 1000) {
     const { data, error } = await supabase
       .from('prices').select('isu_cd, isu_nm').eq('bas_dd', last?.[0]?.bas_dd).order('isu_cd').range(from, from + 999)
     if (error) throw new Error(error.message)
-    for (const r of data ?? []) {
-      codes.add(r.isu_cd)
-      if ([...r.isu_nm].length < 3) continue
-      names.push([r.isu_nm, r.isu_cd])
-      // Group prefixes are often written with a space: SK 하이닉스, LG 에너지솔루션
-      const m = r.isu_nm.match(/^([A-Z&]+)(\p{Script=Hangul}.*)$/u)
-      if (m) names.push([`${m[1]} ${m[2]}`, r.isu_cd])
-    }
+    stocks.push(...(data ?? []))
     if (!data || data.length < 1000) break
+  }
+  return buildStockIndex(stocks)
+}
+
+export function buildStockIndex(stocks: { isu_cd: string; isu_nm: string }[]): StockIndex {
+  const names: [string, string][] = []
+  const codes = new Set<string>()
+  for (const r of stocks) {
+    codes.add(r.isu_cd)
+    if ([...r.isu_nm].length < 3) continue
+    names.push([r.isu_nm, r.isu_cd])
+    // Group prefixes are often written with a space: SK 하이닉스, LG 에너지솔루션
+    const m = r.isu_nm.match(/^([A-Z&]+)(\p{Script=Hangul}.*)$/u)
+    if (m) names.push([`${m[1]} ${m[2]}`, r.isu_cd])
   }
   names.sort((a, b) => b[0].length - a[0].length) // longest first, so 삼성전자우 is checked before 삼성전자
   return { names, codes }

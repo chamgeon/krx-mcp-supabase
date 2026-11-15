@@ -48,7 +48,7 @@ function json(data: unknown) {
 function kst(iso: string): string {
   return new Date(new Date(iso).getTime() + 9 * 3600_000).toISOString().slice(0, 16).replace('T', ' ') + ' KST'
 }
-function sinceIso(since: string | undefined, defaultDays: number): string {
+export function sinceIso(since: string | undefined, defaultDays: number): string {
   if (!since) return new Date(Date.now() - defaultDays * 86400_000).toISOString()
   const s = since.replace(/-/g, '')
   if (/^\d{8}$/.test(s)) return new Date(`${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T00:00:00+09:00`).toISOString()
