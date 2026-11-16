@@ -9,6 +9,7 @@
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2'
+import { krxDayProblems, krxItems, parseKrxRows, type PriceRow, toIsoDate } from './parse.ts'
 
 const KRX_BASE = 'https://data-dbg.krx.co.kr/svc/apis/sto'
 const MARKETS = [
@@ -24,23 +25,11 @@ const supabase = createClient(
   { auth: { persistSession: false } },
 )
 
-// KRX returns every number as a string, often comma-formatted, and "-" for empty.
-function num(v: unknown): number | null {
-  if (v === null || v === undefined) return null
-  const s = String(v).replace(/,/g, '').trim()
-  if (s === '' || s === '-') return null
-  const n = Number(s)
-  return Number.isFinite(n) ? n : null
-}
-
 function ymd(d: Date): string {
   return d.toISOString().slice(0, 10).replace(/-/g, '')
 }
 function parseYmd(s: string): Date {
   return new Date(Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)))
-}
-function toIsoDate(s: string): string {
-  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`
 }
 function isWeekend(d: Date): boolean {
   const w = d.getUTCDay()
@@ -58,37 +47,18 @@ async function fetchMarket(path: string, basDd: string): Promise<Record<string, 
   })
   if (res.status === 429) throw new Error('KRX daily call limit reached (429)')
   if (!res.ok) throw new Error(`KRX ${path} ${basDd}: HTTP ${res.status} ${await res.text()}`)
-  const json = await res.json()
-  return Array.isArray(json?.OutBlock_1) ? json.OutBlock_1 : []
+  return krxItems(await res.json())
 }
 
 async function ingestDay(basDd: string): Promise<number> {
-  const rows: Record<string, unknown>[] = []
-  for (const { market, path } of MARKETS) {
-    const items = await fetchMarket(path, basDd)
-    for (const r of items) {
-      if (!r.ISU_CD) continue
-      rows.push({
-        bas_dd: toIsoDate(basDd),
-        isu_cd: r.ISU_CD,
-        isu_nm: r.ISU_NM,
-        market,
-        sect_tp_nm: r.SECT_TP_NM || null,
-        close: num(r.TDD_CLSPRC),
-        change: num(r.CMPPREVDD_PRC),
-        fluc_rt: num(r.FLUC_RT),
-        open: num(r.TDD_OPNPRC),
-        high: num(r.TDD_HGPRC),
-        low: num(r.TDD_LWPRC),
-        volume: num(r.ACC_TRDVOL),
-        trdval: num(r.ACC_TRDVAL),
-        mktcap: num(r.MKTCAP),
-        list_shrs: num(r.LIST_SHRS),
-        source: 'krx',
-        as_of: null,
-      })
-    }
-  }
+  const byMarket: PriceRow[][] = []
+  for (const { market, path } of MARKETS) byMarket.push(parseKrxRows(await fetchMarket(path, basDd), market, basDd))
+  const [kospi, kosdaq] = byMarket
+  // Refuse data that looks wrong (a renamed field, missing rows) before writing anything: the stored day and the KIS
+  // rows stay as they are, and the run fails with the reason
+  const problems = krxDayProblems(kospi, kosdaq, await previousDayCount(toIsoDate(basDd)))
+  if (problems.length) throw new Error(`refused ${basDd}: ${problems.join('; ')}`)
+  const rows = [...kospi, ...kosdaq]
   // Empty = holiday, or KRX hasn't published that day yet
   for (let i = 0; i < rows.length; i += 1000) {
     const { error } = await supabase
@@ -106,6 +76,19 @@ async function ingestDay(basDd: string): Promise<number> {
     if (error) throw new Error(`cleanup ${basDd}: ${error.message}`)
   }
   return rows.length
+}
+
+// Stock count of the latest KRX day before `dayIso` (null when there is none, e.g. the first load)
+async function previousDayCount(dayIso: string): Promise<number | null> {
+  const { data, error } = await supabase
+    .from('available_dates')
+    .select('row_count')
+    .eq('final', true)
+    .lt('bas_dd', dayIso)
+    .order('bas_dd', { ascending: false })
+    .limit(1)
+  if (error) throw new Error(error.message)
+  return data?.[0]?.row_count ?? null
 }
 
 // Days whose rows all come from KRX

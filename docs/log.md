@@ -117,3 +117,80 @@ What was done and why. Oldest first; new entries go at the bottom.
 - **Done:** a weekly GitHub Action dumps `public` (schema + data) and `auth` data, encrypts it with a passphrase, and
   keeps it 35 days as an artifact. **Why:** the free plan has no backups, and usage logs and user preferences can't be
   re-fetched from anywhere. Encrypted because the dump holds user emails and tokens.
+
+## 2026-11-16 — Backup failure: pin the Supabase CLI
+- **Done:** the backup workflow pins the CLI (`version: 3.1.0`) instead of `latest`. **Why:** the 11-16 run failed
+  before dumping anything: resolving `latest` hit GitHub's API rate limit. Pinning also keeps a new major version from
+  changing `db dump` unnoticed. v3.1.0 was tested locally with all three dump commands before the pin was raised from
+  2.120.0; bump it the same way.
+
+## 2026-11-16 — Tests: what and how
+- **Decided:** test correctness and the tool contract, not latency or concurrency. **Why:** traffic is one person;
+  real latency is already in `tool_calls` (`tool_usage_weekly` has p50/p95).
+- **Done:** three suites, from fast to complete: `deno task test` (unit tests next to the code, `*_test.ts`, no setup),
+  `deno task test:db` (`screen_stocks`, views, triggers on the local stack), `deno task test:mcp` (every tool over HTTP
+  with the official MCP client, auth, usage logging). See README → Tests. **Why:** Deno's built-in test runner needs
+  nothing new; unit tests stay instant, and the ones that need Docker are kept apart.
+- **Done:** a local Supabase stack with `supabase/seed.sql`: made-up stocks (9000xx), each shaped to trigger one signal,
+  plus a provisional KIS day and two Telegram channels. **Why:** tests need fixed data and must never write to
+  production; the migrations alone rebuilding the schema is itself a check.
+- **Done:** pure logic moved out of the functions so tests can import it (`mcp/analyze.ts`, `krx-ingest/parse.ts`,
+  `kis-ingest/parse.ts`, `buildStockIndex`). No behavior change.
+- **Done:** a test that `screen_stocks` (SQL) and `analyze()` (TypeScript) agree on every metric for every seeded stock.
+  **Why:** they compute the same definitions in two languages; a change to one alone makes the screen find a stock that
+  `analyze_stock` then describes differently.
+- Tests were checked by breaking the code on purpose (halted-day check, a response field name, the KRX high/low
+  mapping, the Telegram text fix); each break made the expected test fail.
+
+## 2026-11-16 — New listings in `analyze_stock`
+- **Decided:** support new IPOs: averages and ratios use the prior days that exist (`avg_prior_days`), the N-day high is
+  reported over the days since listing, and the breakout stays null until N prior days exist. A `SHORT_HISTORY` signal
+  says so. **Why:** the consistency test found `analyze()` returned null for stocks listed < 21 days ago while
+  `screen_stocks` averaged the days available, so a screen could find an IPO that `analyze_stock` couldn't describe.
+  Users want to look at new listings; a breakout needs a full window either way.
+
+## 2026-11-16 — Local login: `PUBLIC_SUPABASE_URL`
+- **Done:** the issuer check and the OAuth metadata use `PUBLIC_SUPABASE_URL` when set, else `SUPABASE_URL`; the JWKS is
+  still fetched from `SUPABASE_URL`. Only `supabase/tests/functions.env` sets it. **Why:** locally the function reaches
+  Supabase at `http://kong:8000` while tokens are issued for `http://127.0.0.1:54321`, so every user token was rejected.
+  Production is unchanged (both URLs are the same there).
+- **Done:** tests serve functions with `supabase/tests/functions.env` (dummy keys, committed). **Why:** `supabase/.env`
+  has the real KIS/KRX keys; tests must not reach KIS, KRX or t.me. The MCP suite fails first if the wrong env is used.
+
+## 2026-11-16 — Real API responses as test fixtures (gitignored)
+- **Done:** `deno task fixtures` (`scripts/fetch_fixtures.ts`) saves one real response per source: KRX both markets for
+  2026-11-13, a KIS `intstock-multprice` snapshot (30 stocks, mid-session), the `t.me/s/ehdwl` page. Parser tests run on
+  them. **Why:** the seed is idealized; real data has 107 no-trade stocks, 96 alphanumeric 종목코드, 소속부 strings,
+  KIS's empty rows for unknown codes.
+- They confirmed the assumptions the code relies on: no-trade days have open/high/low = 0 with the close carried
+  (in KIS too), 시가총액 = 종가 × 상장주식수 exactly, 등락률 matches 전일대비 (KRX rounds half away from zero), and KIS's
+  previous close equals KRX's close.
+- **Decided:** the fixture files are gitignored; their tests are skipped (not failed) without them, so a fresh clone and
+  CI pass. **Why:** the repo is public, the Telegram page is a third party's posts, and KRX's terms don't allow passing
+  the data on (see 2026-10-11). Trade-off: CI doesn't run those 18 tests, and only the KRX files can be fetched again
+  identically; the KIS snapshot and the Telegram page are one-time, so a refetch means updating the values pinned in
+  their tests. Keep a private copy of the `fixtures/` folders.
+
+## 2026-11-16 — Ingest validation: refuse data that looks wrong
+- **Done:** `krx-ingest` and `kis-ingest` check every batch before writing (`_shared/validate.ts`): row count (KRX
+  ≥ 90% of the previous day, both markets present; KIS ≥ 95% of the stocks asked for), each field present, codes unique,
+  OHLC in order, 등락률 within ±30%. More than 1% of rows (and more than 5) failing a check refuses the batch: nothing is
+  written and the run returns 500 with the reason. **Why:** a format change doesn't throw in the parsers, it yields
+  nulls or no rows. Before, a renamed KRX field would have stored the day with null prices and then deleted that day's
+  KIS rows; a renamed block looked like a holiday.
+- **Done:** Telegram: a page where fewer than 80% of the posts (counted from the `data-post` markers in the raw HTML)
+  parse, or most posts are empty, is an error; so is an empty newest page for a channel that had posts. The channel then
+  gets `last_error` / `poll_errors`. **Why:** the reader scrapes HTML; a renamed CSS class made it find nothing and
+  record a successful poll, so a broken channel looked healthy.
+- **Done:** refreshing stored Telegram posts never replaces their text with empty text. **Why:** a renamed text class
+  would have wiped the stored text of every channel's newest posts on each poll (reproduced in a DB test before the fix).
+- Expect after deploy: if KRX publishes KOSPI before KOSDAQ, `krx-ingest` returns 500 until both are out instead of
+  storing half a day; the next run picks it up.
+
+## Open
+- Deploy `krx-ingest`, `kis-ingest`, `telegram-ingest` and `mcp` (all changed in the 11-16 entries).
+- Alert on ingest failures (e.g. a Telegram message): refusals only show in function logs and `last_error` now.
+- Run the `screen_stocks` vs. `analyze()` comparison on a copy of production data (all ~2,800 stocks) to find
+  disagreements the seed can't show.
+- CI: run `deno task test` on every push.
+- Telegram tagging matches only 6-digit codes, so the 96 alphanumeric 종목코드 can be tagged by name only.

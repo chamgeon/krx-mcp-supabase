@@ -49,7 +49,30 @@ export async function fetchPage(channel: string, before?: number): Promise<TgPag
   const res = await fetch(url, { headers: { 'User-Agent': UA, 'Accept-Language': 'ko,en;q=0.8' }, redirect: 'manual' })
   if (res.status >= 300 && res.status < 400) return null // no preview: t.me/s/<name> redirects to t.me/<name>
   if (!res.ok) throw new Error(`t.me/s/${channel}: HTTP ${res.status}`)
-  return parsePage(await res.text(), channel)
+  const html = await res.text()
+  const page = parsePage(html, channel)
+  const problems = pageProblems(html, page, channel)
+  if (problems.length) throw new Error(`t.me/s/${channel}: ${problems.join('; ')}`)
+  return page
+}
+
+/**
+ * Problems with a parsed preview page, empty when it looks right. The preview is HTML, not an API: when Telegram renames
+ * a CSS class, parsePage doesn't fail, it finds fewer posts or empty text. The post markers (data-post="<channel>/<id>")
+ * are counted straight from the HTML, independently of the class names parsePage relies on.
+ */
+export function pageProblems(html: string, page: TgPage, channel: string): string[] {
+  const problems: string[] = []
+  const esc = channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const markers = new Set(html.match(new RegExp(`data-post="${esc}/\\d+"`, 'gi')) ?? []).size
+  if (markers > 0 && page.posts.length < markers * 0.8) {
+    problems.push(`parsed ${page.posts.length} of ${markers} posts on the page (page format changed?)`)
+  }
+  const blank = page.posts.filter((p) => !p.text && !p.has_media).length
+  if (page.posts.length >= 5 && blank > page.posts.length / 2) {
+    problems.push(`${blank} of ${page.posts.length} posts have no text and no media (text format changed?)`)
+  }
+  return problems
 }
 
 export function parsePage(html: string, channel: string): TgPage {
@@ -213,6 +236,10 @@ export async function syncChannel(
       pages++
       if (!page) throw new Error('no public preview (channel missing, private, or preview turned off)')
       title ??= page.title
+      // The newest page of a channel we've collected from can't be empty: posts didn't vanish, the parser lost them
+      if (page.posts.length === 0 && pages === 1 && known > 0) {
+        throw new Error('no posts parsed on the newest page, but the channel had posts before (page format changed?)')
+      }
       if (page.posts.length === 0) break
       // New posts are tagged (the stock index is only loaded when there are any). Posts we already have just get
       // their views/text refreshed: leaving stock_codes out of the upsert keeps their existing tags.
@@ -224,8 +251,12 @@ export async function syncChannel(
         const { error } = await supabase.from('telegram_messages').upsert(rows, { onConflict: 'username,msg_id' })
         if (error) throw new Error(`save posts: ${error.message}`)
       }
-      if (seen.length) {
-        const rows = seen.map((p) => ({ username: channel, ...p }))
+      // Never replace stored text with empty text: a post that parses empty now (format change, or a caption-less
+      // edit) keeps what we have, and only its views etc. are refreshed
+      const withText = seen.filter((p) => p.text).map((p) => ({ username: channel, ...p }))
+      const noText = seen.filter((p) => !p.text).map(({ text: _t, ...p }) => ({ username: channel, ...p }))
+      for (const rows of [withText, noText]) {
+        if (!rows.length) continue
         const { error } = await supabase.from('telegram_messages').upsert(rows, { onConflict: 'username,msg_id' })
         if (error) throw new Error(`update posts: ${error.message}`)
       }

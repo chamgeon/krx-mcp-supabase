@@ -211,3 +211,99 @@ Deno.test('trading_days follows inserts and deletes on daily_prices', async () =
     await db.from('daily_prices').delete().eq('bas_dd', day)
   }
 })
+
+// ---- telegram sync against a changed page format ----------------------------------------------------
+// Runs the real syncChannel on the local DB with t.me answered by a fake page (fetch is stubbed for t.me only; the
+// Supabase client still talks to the local stack). Seeded testchannel_a has posts 1 and 2.
+
+import { buildStockIndex, syncChannel } from '../functions/_shared/telegram.ts'
+
+const post = (id: number, textClass: string, msgClass = 'tgme_widget_message') => `
+<div class="${msgClass}" data-post="testchannel_a/${id}">
+  <div class="tgme_widget_message_bubble">
+    <div class="${textClass}">changed format ${id}</div>
+    <span class="tgme_widget_message_views">10</span>
+    <a class="tgme_widget_message_date"><time datetime="2026-11-13T0${id}:00:00+00:00"></time></a>
+  </div>
+</div>`
+const page = (body: string) => `<html><head><meta property="og:title" content="Test Channel A"></head><body>${body}</body></html>`
+
+async function syncWithPage(html: string) {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input)
+    if (url.startsWith('https://t.me/')) return Promise.resolve(new Response(html, { status: 200 }))
+    return realFetch(input, init)
+  }) as typeof fetch
+  try {
+    return await syncChannel(db, 'testchannel_a', () => Promise.resolve(buildStockIndex([])), { maxPages: 1 })
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+async function channelState() {
+  const { data } = await db.from('telegram_channels').select('last_error, poll_errors').eq('username', 'testchannel_a').single()
+  const { data: msgs } = await db.from('telegram_messages').select('msg_id, text, views').eq('username', 'testchannel_a').order('msg_id')
+  return { ...data, msgs }
+}
+
+// Put the seeded channel back exactly, so later runs (and the MCP tests) see it as before and never poll t.me
+async function restoreChannel() {
+  await db.from('telegram_channels').update({ last_error: null, poll_errors: 0, last_msg_id: 2, last_polled_at: '2100-01-01T00:00:00Z' })
+    .eq('username', 'testchannel_a')
+  await db.from('telegram_messages').update({ text: '돌파전자 신고가 돌파, HBM 수주 기대', views: 1200 }).eq('username', 'testchannel_a').eq('msg_id', 1)
+  await db.from('telegram_messages').update({ text: '급증바이오 거래대금 급증', views: 800 }).eq('username', 'testchannel_a').eq('msg_id', 2)
+}
+
+Deno.test({
+  name: 'telegram: renamed message class → channel marked failing, posts untouched',
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    try {
+      const r = await syncWithPage(page(post(1, 'tgme_widget_message_text', 'tgme_message') + post(2, 'tgme_widget_message_text', 'tgme_message')))
+      assertEquals(r.ok, false)
+      assert(r.error?.includes('parsed 0 of 2 posts'), r.error)
+      const s = await channelState()
+      assert(s.last_error?.includes('page format changed'), s.last_error ?? 'no last_error')
+      assertEquals(s.poll_errors, 1)
+      assertEquals(s.msgs?.map((m) => m.text), ['돌파전자 신고가 돌파, HBM 수주 기대', '급증바이오 거래대금 급증'])
+    } finally {
+      await restoreChannel()
+    }
+  },
+})
+
+Deno.test({
+  name: 'telegram: renamed text class → stored text is kept, views still refresh',
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    try {
+      // Only 2 posts on the page (pageProblems needs 5+ to call it a format change), so the sync goes through
+      const r = await syncWithPage(page(post(1, 'tgme_widget_message_body') + post(2, 'tgme_widget_message_body')))
+      assertEquals(r.ok, true, r.error)
+      const s = await channelState()
+      assertEquals(s.msgs?.map((m) => [m.text, m.views]), [['돌파전자 신고가 돌파, HBM 수주 기대', 10], ['급증바이오 거래대금 급증', 10]])
+    } finally {
+      await restoreChannel()
+    }
+  },
+})
+
+Deno.test({
+  name: 'telegram: newest page empty for a channel that had posts → failing, not "no new posts"',
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    try {
+      // Even the data-post markers are gone (e.g. renamed attribute), so only the "had posts before" check can tell
+      const r = await syncWithPage(page('<div class="something_new">post</div>'))
+      assertEquals(r.ok, false)
+      assert(r.error?.includes('channel had posts before'), r.error)
+    } finally {
+      await restoreChannel()
+    }
+  },
+})

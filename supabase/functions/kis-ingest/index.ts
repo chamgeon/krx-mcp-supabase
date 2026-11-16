@@ -16,7 +16,8 @@
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2'
-import { kisGet, kisToken, num } from '../_shared/kis.ts'
+import { kisGet, kisToken } from '../_shared/kis.ts'
+import { kisSnapshotProblems, parseKisRows, type Prev } from './parse.ts'
 
 const MULTI_MAX = 30 // intstock-multprice: up to 30 stocks per call
 
@@ -26,14 +27,6 @@ const supabase = createClient(
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
   { auth: { persistSession: false } },
 )
-
-type Prev = {
-  isu_cd: string
-  isu_nm: string
-  market: string
-  sect_tp_nm: string | null
-  list_shrs: number | null
-}
 
 // Today in Korea as YYYYMMDD
 function todayKst(): string {
@@ -83,7 +76,7 @@ async function stocksOf(dayIso: string): Promise<Prev[]> {
 
 async function snapshot(token: string, todayIso: string, asOf: string, prev: Prev[]): Promise<number> {
   const byCode = new Map(prev.map((p) => [p.isu_cd, p]))
-  const rows: Record<string, unknown>[] = []
+  const rows: ReturnType<typeof parseKisRows> = []
   for (let i = 0; i < prev.length; i += MULTI_MAX) {
     const params: Record<string, string> = {}
     prev.slice(i, i + MULTI_MAX).forEach((p, j) => {
@@ -91,32 +84,13 @@ async function snapshot(token: string, todayIso: string, asOf: string, prev: Pre
       params[`FID_INPUT_ISCD_${j + 1}`] = p.isu_cd
     })
     const body = await kisGet(token, '/uapi/domestic-stock/v1/quotations/intstock-multprice', 'FHKST11300006', params)
-    for (const r of body.output ?? []) {
-      const p = byCode.get(r.inter_shrn_iscd) // unknown / delisted codes come back as empty rows
-      if (!p) continue
-      const close = num(r.inter2_prpr)
-      rows.push({
-        bas_dd: todayIso,
-        isu_cd: p.isu_cd,
-        isu_nm: r.inter_kor_isnm || p.isu_nm,
-        market: p.market,
-        sect_tp_nm: p.sect_tp_nm,
-        close,
-        change: num(r.inter2_prdy_vrss),
-        fluc_rt: num(r.prdy_ctrt),
-        open: num(r.inter2_oprc),
-        high: num(r.inter2_hgpr),
-        low: num(r.inter2_lwpr),
-        volume: num(r.acml_vol),
-        trdval: num(r.acml_tr_pbmn),
-        mktcap: close != null && p.list_shrs != null ? close * p.list_shrs : null,
-        list_shrs: p.list_shrs,
-        source: 'kis',
-        as_of: asOf,
-      })
-    }
+    rows.push(...parseKisRows(body.output, byCode, todayIso, asOf))
     await sleep(100) // stay well under KIS's 20 calls/s
   }
+  // Refuse a snapshot that looks wrong (renamed fields, most stocks missing): the previous snapshot stays, with its
+  // older as_of, and the run fails with the reason
+  const problems = kisSnapshotProblems(rows, prev.length)
+  if (problems.length) throw new Error(`refused snapshot: ${problems.join('; ')}`)
   for (let i = 0; i < rows.length; i += 1000) {
     const { error } = await supabase
       .from('live_prices')

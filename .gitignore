@@ -3,3 +3,5 @@ sql/cron.sql
 .DS_Store
 supabase/.temp/
 supabase/.branches/
+# Real API responses for parser tests (third-party data, public repo); fetch with `deno task fixtures`
+supabase/functions/*/fixtures/

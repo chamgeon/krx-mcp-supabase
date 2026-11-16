@@ -2,7 +2,7 @@
 // Run from the repo root: deno task test
 
 import { assertEquals } from 'jsr:@std/assert@1'
-import { buildStockIndex, channelName, parsePage, tagStocks } from './telegram.ts'
+import { buildStockIndex, channelName, pageProblems, parsePage, tagStocks } from './telegram.ts'
 
 Deno.test('channelName normalizes the ways people paste a channel', () => {
   for (const s of ['@StockNews', 'stocknews', 't.me/stocknews', 'https://t.me/s/stocknews/123', 'https://www.t.me/stocknews?x=1']) {
@@ -116,4 +116,93 @@ Deno.test('parsePage: document title becomes text, M views', () => {
   assertEquals(p.has_media, true)
   assertEquals(p.edited, false)
   assertEquals(p.forwarded_from, null)
+})
+
+// ---- real preview page --------------------------------------------------------------------------------
+// t.me/s/ehdwl as served on 2026-11-16 (fixtures/, saved by `deno task fixtures telegram ehdwl`), tagged with the real
+// stock list of 2026-11-13 (the KRX fixtures).
+
+// The fixtures are gitignored (third-party data, public repo): fetch them with `deno task fixtures`. Without them these
+// tests are skipped, not failed, so a fresh clone and CI still pass.
+const REAL_FILES = [
+  new URL('./fixtures/tme_s_ehdwl.html', import.meta.url),
+  new URL('../krx-ingest/fixtures/stk_bydd_trd_20261113.json', import.meta.url),
+  new URL('../krx-ingest/fixtures/ksq_bydd_trd_20261113.json', import.meta.url),
+]
+const HAVE_REAL = REAL_FILES.every((f) => {
+  try {
+    return Deno.statSync(f).isFile
+  } catch {
+    return false
+  }
+})
+if (!HAVE_REAL) console.warn('telegram fixtures missing: real-page tests skipped (run: deno task fixtures)')
+const realHtml = HAVE_REAL ? Deno.readTextFileSync(REAL_FILES[0]) : ''
+const realIdx = buildStockIndex(
+  (HAVE_REAL ? REAL_FILES.slice(1) : []).flatMap((f) => JSON.parse(Deno.readTextFileSync(f)).OutBlock_1)
+    .map((r: Record<string, string>) => ({ isu_cd: r.ISU_CD, isu_nm: r.ISU_NM })),
+)
+const realPageTest = (name: string, fn: () => void) => Deno.test({ name, ignore: !HAVE_REAL, fn })
+
+realPageTest('real page: 20 posts, in order, with clean text', () => {
+  const page = parsePage(realHtml, 'ehdwl')
+  assertEquals(page.title, '사제콩이_서상영')
+  assertEquals(page.posts.length, 20)
+  const ids = page.posts.map((p) => p.msg_id)
+  assertEquals(ids, [...ids].sort((a, b) => a - b)) // oldest first, as on the page
+  for (const p of page.posts) {
+    assertEquals(new Date(p.ts).toISOString().slice(0, 4), '2026', `${p.msg_id} ts`)
+    assertEquals(/<[a-z/]/i.test(p.text), false, `${p.msg_id} has HTML left in its text`)
+    assertEquals(p.links.every((l) => /^https?:\/\//.test(l)), true, `${p.msg_id} links`)
+    assertEquals(p.views === null || p.views > 0, true, `${p.msg_id} views`)
+  }
+  assertEquals(page.posts.filter((p) => p.text.length > 0).length, 20)
+})
+
+// Pins today's tagging of real posts. If a rule change alters it, review the diff: a new tag should be a real mention,
+// a lost one should have been a false match.
+realPageTest('real page: stock tags', () => {
+  const tags = Object.fromEntries(
+    parsePage(realHtml, 'ehdwl').posts
+      .map((p): [number, string[]] => [p.msg_id, tagStocks(p.text, realIdx).sort()])
+      .filter(([, t]) => t.length),
+  )
+  assertEquals(tags, {
+    11289: ['000660'],
+    11293: ['000660'],
+    11295: ['000660', '005930'], // SK하이닉스 ADR, 삼성전자 GDR
+    11298: ['000660'],
+    11300: ['000660'],
+    11304: ['000660', '005930'],
+  })
+})
+
+// ---- validation (pageProblems): class renames don't make parsePage fail, they make it find less
+
+Deno.test('pageProblems: the inline page has an unparseable post (no time), which is flagged', () => {
+  assertEquals(pageProblems(HTML, parsePage(HTML, 'stocknews'), 'stocknews'), ['parsed 2 of 3 posts on the page (page format changed?)'])
+})
+
+Deno.test('pageProblems: an empty channel is fine', () => {
+  const empty = '<html><head><meta property="og:title" content="Empty"></head><body></body></html>'
+  assertEquals(pageProblems(empty, parsePage(empty, 'stocknews'), 'stocknews'), [])
+})
+
+realPageTest('pageProblems: the real page passes', () => {
+  assertEquals(pageProblems(realHtml, parsePage(realHtml, 'ehdwl'), 'ehdwl'), [])
+})
+
+realPageTest('pageProblems: renamed message class (posts not found) is refused', () => {
+  const edited = realHtml.replaceAll('tgme_widget_message ', 'tgme_message ').replaceAll('"tgme_widget_message"', '"tgme_message"')
+  const page = parsePage(edited, 'ehdwl')
+  assertEquals(page.posts.length, 0)
+  assertEquals(pageProblems(edited, page, 'ehdwl'), ['parsed 0 of 20 posts on the page (page format changed?)'])
+})
+
+realPageTest('pageProblems: renamed text class (posts found, text empty) is refused', () => {
+  const edited = realHtml.replaceAll('tgme_widget_message_text', 'tgme_widget_message_body')
+  const page = parsePage(edited, 'ehdwl')
+  assertEquals(page.posts.length, 20)
+  const blank = page.posts.filter((p) => !p.text && !p.has_media).length
+  assertEquals(pageProblems(edited, page, 'ehdwl'), [`${blank} of 20 posts have no text and no media (text format changed?)`])
 })
