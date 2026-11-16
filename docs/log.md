@@ -187,10 +187,85 @@ What was done and why. Oldest first; new entries go at the bottom.
 - Expect after deploy: if KRX publishes KOSPI before KOSDAQ, `krx-ingest` returns 500 until both are out instead of
   storing half a day; the next run picks it up.
 
+## 2026-11-16 — Benchmark (`deno task bench`)
+- **Done:** `scripts/bench.ts` calls the read-only tools against production with the official MCP client and records
+  client wall time (`total`), server time (`tool`) and `overhead` = total − tool. 50 calls per case in 5 rounds 60 s
+  apart, after a warm-up; results in `bench-results/` (gitignored). Run it as `caffeinate -i deno task bench` (a Mac
+  sleep mid-run skews the client-side numbers), after the market close so runs compare (during the session
+  `analyze_stock` adds a live KIS quote and movers read the intraday day).
+- **Decided:** arguments mirror real usage from `tool_calls.args` (no date where real calls omit it; feed with a 1 h and
+  a 20 h `since`; search over 60 h), not invented ones; search terms are generic so other users' queries don't land in
+  the public repo. **Why:** the first run's guesses took different code paths than real calls. 10 calls per case made
+  p95 equal max; 50 makes it meaningful.
+- Not covered: the write tools and the per-user feed path (the shared key has no user, so the feed reads all channels
+  and never runs `user_channels` or the background refresh). Real calls' `timings` cover those.
+- **Decided:** benchmark calls are not logged. The server recognizes the shared key plus a `krx-bench/` User-Agent,
+  skips `tool_calls`, and returns `latency_ms` and the step timings in the result's `_meta` instead. A logged-in user is
+  always logged. **Why:** test traffic in `tool_calls` would have to be filtered out of every query, and usage drives
+  the go/no-go decisions. The first run's 110 logged rows were deleted. The script stops after one call if the deployed
+  function doesn't return `_meta`.
+
+## 2026-11-16 — Per-step timings (`tool_calls.timings`)
+- **Done:** `tool_calls.timings jsonb`, e.g. `[{"step":"messages","start":760,"ms":681}, …]` (`start` = ms after the tool
+  began, so parallel steps show as overlapping). `step('name', query)` in `mcp/timing.ts` records into the current call
+  through `AsyncLocalStorage` (checked to work in the Edge runtime), so shared helpers record without a timer being
+  passed around. Every DB and KIS call in the read tools is a step; `bg_stale_check` marks the background refresh.
+  **Why:** `latency_ms` alone can't say which query is slow; the median per step is one query (see the migration).
+- `pg_stat_statements` showed 0.5–1 s means for `available_dates` queries; they run in ~1.6 ms today. The means mix in
+  the pre-11-13 view (742k-row count): `create or replace view` keeps the same statement entry.
+
+## 2026-11-16 — Region forwarding (`DB_REGION`)
+- Found with the step timings: every DB round trip took ~650–800 ms on real calls while the SQL ran in under 2 ms.
+  **Why:** the database is in `ap-south-1` (Mumbai), and Edge Functions run in the region nearest the caller (Claude's
+  servers, or Seoul for the benchmark), so every query crossed continents, plus connection setup on fresh copies.
+- **Done:** `mcp` forwards a request that lands outside `DB_REGION` once to its own copy there (`x-region` header),
+  which does the work next to the database and streams the answer back (`mcp/forward.ts`). The URL users have doesn't
+  change; `DB_REGION=ap-south-1` is a secret (unset = off, as locally and in tests). Never loops: only a copy outside
+  `DB_REGION` forwards (`SB_REGION`), and a forwarded request (`x-mcp-forwarded`) is never forwarded again. If the
+  forward fails, the request is handled where it landed. Responses carry `x-mcp-handled-in`. **Why:** Supabase has no
+  project-level region setting (only per request: header, `?forceFunctionRegion=`, client option), and a parameter in
+  the connector URL means handing out new links.
+- Results, hourly user's real calls (tool time): feed 1,510 → 517 ms, movers 2,131 → 209 ms. Benchmark from Seoul:
+  per trip ~190 → ~45 ms; overhead ~45 → ~215 ms (the hop, once per call). Tools with 2–3 queries 25–45% faster
+  end to end; single-query tools about even from Seoul (more gain from Claude's farther regions).
+- Remaining cost: a fresh copy after idle (every hourly call): the first query ~150–700 ms (connection setup) and a
+  cold hop (~1 s total for the first call after 60 s idle in the benchmark). The real crossing from Claude to Mumbai
+  isn't measured anywhere (`latency_ms` starts inside the Mumbai copy).
+- Ingest functions are unaffected: `pg_cron` calls them from the database, so they already run in Mumbai.
+- README: CLI v3 `supabase db push` targets the local stack; the setup now says `supabase db push --remote`.
+
+## 2026-11-16 — Telegram decisions
+- **Decided:** drop the feed's background refresh (`refreshStale` / `bg_stale_check`), reversing 11-13. **Why:** it
+  never makes the current answer fresher, `telegram-ingest` already polls every 5 minutes, it costs a query on every
+  feed call, and it re-polls channels the cron backs off from after 3 errors. Not done yet (see Open).
+- **Decided:** keep the backfill at 8 pages / 30 days, whichever comes first. A busy channel gets less history
+  (insidertracking ~59 posts/day: 2.5 days). **Why:** older posts aren't important, and they would fill the database
+  as channels are added.
+- **Decided:** adding or following a new channel should answer after the first page (it proves the channel is public
+  and holds the newest posts) and backfill the rest after the response. Needs a backfill status per channel, so the
+  cron finishes an interrupted backfill (it only fetches newer posts otherwise, so a gap would stay) and feed/search can
+  say a channel is still filling. **Why:** following a new channel took 8–21 s. Not done yet.
+- `telegram_channels.active` only stops polling; stored posts stay readable. Nothing in the code sets it to false.
+
 ## Open
-- Deploy `krx-ingest`, `kis-ingest`, `telegram-ingest` and `mcp` (all changed in the 11-16 entries).
+- Commit the region forwarding (`mcp/forward.ts`, its test, the `index.ts` handler); deployed since 16:18 but
+  uncommitted.
+- Parallelize independent queries; each removed trip saves ~40–50 ms warm (findings 2026-11-16):
+  - feed / search / add channel: start `latest_trading_day` at the beginning instead of after the posts; drop
+    `bg_stale_check` (decided above);
+  - `data_status` only needs the day: run it next to the main query in movers, screen, analyze (next to the KIS quote);
+  - `check_available_dates`: select `final, as_of` in the `last` query instead of a separate `data_status`; with a
+    date, run `data_status` with the other three;
+  - then benchmark after the close and compare with the hourly user's real `timings`.
+- Keep-warm experiment: a cron call to `mcp` every few minutes, to keep the Mumbai copy and its connection alive
+  (only the Mumbai side; Supabase doesn't promise the same copy serves the next request). Judge by real timings.
+- Log the forward hop's duration from the landing copy, so the real crossing (Claude → Mumbai) is measured.
+- Telegram background backfill with a status column, cron resume, and a "still collecting" note in feed/search (8-page
+  cap kept).
 - Alert on ingest failures (e.g. a Telegram message): refusals only show in function logs and `last_error` now.
 - Run the `screen_stocks` vs. `analyze()` comparison on a copy of production data (all ~2,800 stocks) to find
   disagreements the seed can't show.
 - CI: run `deno task test` on every push.
 - Telegram tagging matches only 6-digit codes, so the 96 alphanumeric 종목코드 can be tagged by name only.
+- Check what `supabase config push` targets under CLI v3 before the next run (README setup).
+- Optional: a `user_activity` view (signup, first/last call, calls per user) for checking usage without hand-written SQL.

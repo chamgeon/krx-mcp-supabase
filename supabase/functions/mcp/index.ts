@@ -15,6 +15,7 @@ import { createRemoteJWKSet, jwtVerify } from 'npm:jose@^5.9.6'
 import { kisGet, kisToken, num, sessionElapsed } from '../_shared/kis.ts'
 import { registerTelegramTools } from './telegram.ts'
 import { type Step, step, timeCall } from './timing.ts'
+import { forwardHeaders, forwardUrl, responseHeaders, shouldForward } from './forward.ts'
 import {
   analyze,
   charts,
@@ -603,7 +604,34 @@ function unauthorized(reason: string): Response {
   })
 }
 
+// Region of the database; requests landing elsewhere are forwarded there (forward.ts). Unset locally and in tests.
+const DB_REGION = Deno.env.get('DB_REGION') || undefined
+
 Deno.serve(async (req) => {
+  if (!shouldForward(DB_REGION, Deno.env.get('SB_REGION'), req.headers)) return handle(req)
+
+  // Buffered (MCP requests are small JSON), so the same body can still be handled here if forwarding fails
+  const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer()
+  try {
+    const res = await fetch(forwardUrl(MCP_URL, req.url), {
+      method: req.method,
+      headers: forwardHeaders(req.headers, DB_REGION!),
+      body,
+      redirect: 'manual',
+    })
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: responseHeaders(res.headers, res.headers.get('x-sb-edge-region')),
+    })
+  } catch (e) {
+    // Slow (every query crosses regions) but working beats failing
+    console.error('forward to', DB_REGION, 'failed, handling here:', (e as Error).message)
+    return handle(new Request(req.url, { method: req.method, headers: req.headers, body }))
+  }
+})
+
+async function handle(req: Request): Promise<Response> {
   const url = new URL(req.url)
 
   // RFC 9728 protected resource metadata. Clients find it through the WWW-Authenticate header, so it can live under
@@ -639,4 +667,4 @@ Deno.serve(async (req) => {
   } catch (e) {
     return unauthorized(`invalid token: ${(e as Error).message}`)
   }
-})
+}
