@@ -60,7 +60,17 @@ const RUN = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z'
 
 // ---- calls ----------------------------------------------------------------------------------------
 
-type Call = { label: string; round: number; warmup: boolean; total_ms: number; tool_ms: number | null; bytes: number; error?: string }
+type TimedStep = { step: string; start: number; ms: number }
+type Call = {
+  label: string
+  round: number
+  warmup: boolean
+  total_ms: number
+  tool_ms: number | null
+  steps: TimedStep[]
+  bytes: number
+  error?: string
+}
 
 const url = new URL(MCP)
 url.searchParams.set('key', env('MCP_ACCESS_KEY'))
@@ -72,20 +82,21 @@ const calls: Call[] = []
 
 async function one(c: (typeof CASES)[number], round: number, warmup: boolean) {
   const t0 = performance.now()
-  let bytes = 0, toolMs: number | null = null, error: string | undefined
+  let bytes = 0, toolMs: number | null = null, steps: TimedStep[] = [], error: string | undefined
   try {
     const r = await client.callTool({ name: c.tool, arguments: c.args() }) as {
       isError?: boolean
       content: { text?: string }[]
-      _meta?: { latency_ms?: number }
+      _meta?: { latency_ms?: number; timings?: TimedStep[] }
     }
     bytes = r.content.reduce((n, x) => n + (x.text?.length ?? 0), 0)
     toolMs = r._meta?.latency_ms ?? null
+    steps = r._meta?.timings ?? []
     if (r.isError) error = r.content[0]?.text?.slice(0, 200)
   } catch (e) {
     error = (e as Error).message
   }
-  calls.push({ label: c.label, round, warmup, total_ms: performance.now() - t0, tool_ms: toolMs, bytes, error })
+  calls.push({ label: c.label, round, warmup, total_ms: performance.now() - t0, tool_ms: toolMs, steps, bytes, error })
 }
 
 const perRound = Array.from({ length: ROUNDS }, (_, r) => Math.floor(N / ROUNDS) + (r < N % ROUNDS ? 1 : 0))
@@ -154,6 +165,18 @@ for (const r of report) {
   )
 }
 console.log('* not used in real calls yet')
+
+// Where the tool time goes: median duration and start of each step, per case (bg_ = background work, not waited on)
+console.log('\nsteps (p50 ms, p50 start):')
+for (const c of cases) {
+  const xs = calls.filter((x) => x.label === c.label && !x.warmup && !x.error)
+  const names = [...new Set(xs.flatMap((x) => x.steps.map((s) => s.step)))]
+  const parts = names.map((n) => {
+    const ss = xs.flatMap((x) => x.steps.filter((s) => s.step === n))
+    return `${n} ${ms(q(ss.map((s) => s.ms), 50))} @${ms(q(ss.map((s) => s.start), 50))}`
+  })
+  console.log(`  ${pad(c.label, 30)}${parts.join(' → ') || '(no steps)'}`)
+}
 const errs = calls.filter((c) => c.error)
 if (errs.length) console.log('\nerrors:\n  ' + errs.slice(0, 5).map((e) => `${e.label}: ${e.error}`).join('\n  '))
 

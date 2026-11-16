@@ -397,6 +397,36 @@ test('a logged-in user with a krx-bench/ User-Agent is still logged', async () =
   assertEquals([row.auth, row.user_id, row.client], ['oauth', id, 'krx-bench/spoof'])
 })
 
+test('logged calls carry per-step timings', async () => {
+  const { token, id } = await testUser()
+  const me = await connect({ token })
+  try {
+    await call('set_my_channels', { channels: ['testchannel_a'] }, me)
+    const marker = `2026-11-0${1 + Math.floor(Math.random() * 9)}T00:00:00.${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}Z`
+    await call('get_telegram_feed', { since: marker }, me)
+    const row = await waitForLog((q) => q.eq('tool', 'get_telegram_feed').eq('user_id', id).eq('args->>since', marker))
+    const steps = (row.timings as { step: string; start: number; ms: number }[]).map((s) => s.step)
+    // the user's channels, then their posts, then 종목명 for the tagged codes
+    for (const s of ['user_channels', 'messages', 'stock_names']) assert(steps.includes(s), `${s} in ${steps}`)
+    assert(steps.indexOf('user_channels') < steps.indexOf('messages'))
+    for (const t of row.timings) assert(Number.isInteger(t.start) && Number.isInteger(t.ms) && t.ms >= 0, JSON.stringify(t))
+  } finally {
+    await call('set_my_channels', { channels: [] }, me)
+    await me.close()
+  }
+})
+
+test('parallel steps show as overlapping (check_available_dates)', async () => {
+  const bench = await connect({ key: KEY }, 'krx-bench/test-run')
+  const r = await bench.callTool({ name: 'check_available_dates', arguments: {} }) as { _meta?: { timings?: { step: string; start: number }[] } }
+  await bench.close()
+  const t = r._meta?.timings ?? []
+  const names = t.map((s) => s.step)
+  for (const s of ['dates_count', 'dates_first', 'dates_last', 'data_status']) assert(names.includes(s), `${s} in ${names}`)
+  const starts = t.filter((s) => s.step.startsWith('dates_')).map((s) => s.start)
+  assert(Math.max(...starts) - Math.min(...starts) < 20, `the three date queries start together: ${starts}`)
+})
+
 // Close the shared client last so its stream doesn't outlive the tests
 test('cleanup', async () => {
   await shared?.close()

@@ -5,6 +5,7 @@ import type { McpServer } from 'npm:@modelcontextprotocol/server@^2.0.0'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { z } from 'npm:zod@^4.3.6'
 import { channelName, fetchPage, stockIndex, syncChannel } from '../_shared/telegram.ts'
+import { step } from './timing.ts'
 
 const MAX_CHANNELS = 50 // cap on shared collection, so open adding can't turn the server into a crawler
 const BACKFILL_DAYS = 30
@@ -30,7 +31,7 @@ const MSG_COLUMNS = 'username, msg_id, ts, text, views, forwarded_from, has_medi
 let latestDay: { day: string | null; at: number } | null = null
 async function latestTradingDay(supabase: SupabaseClient): Promise<string | null> {
   if (latestDay && Date.now() - latestDay.at < 5 * 60_000) return latestDay.day
-  const { data } = await supabase.from('available_dates').select('bas_dd').order('bas_dd', { ascending: false }).limit(1)
+  const { data } = await step('latest_trading_day', supabase.from('available_dates').select('bas_dd').order('bas_dd', { ascending: false }).limit(1))
   latestDay = { day: data?.[0]?.bas_dd ?? null, at: Date.now() }
   return latestDay.day
 }
@@ -62,7 +63,8 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
   async function stockNames(codes: string[]): Promise<Map<string, string>> {
     const uniq = [...new Set(codes)]
     if (!uniq.length) return new Map()
-    const { data } = await supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', await latestTradingDay(supabase)).in('isu_cd', uniq)
+    const day = await latestTradingDay(supabase)
+    const { data } = await step('stock_names', supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', day).in('isu_cd', uniq))
     return new Map((data ?? []).map((r) => [r.isu_cd, r.isu_nm]))
   }
 
@@ -83,7 +85,8 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
 
   // Polls channels whose last poll is older than STALE_MS (one request each), so reads are fresh between cron runs.
   async function refreshStale(channels: string[]) {
-    const { data } = await supabase.from('telegram_channels').select('username, last_polled_at').in('username', channels)
+    // runs in the background (inBackground): only recorded if it finishes before the response
+    const { data } = await step('bg_stale_check', supabase.from('telegram_channels').select('username, last_polled_at').in('username', channels))
     const stale = (data ?? []).filter((c) => !c.last_polled_at || Date.now() - new Date(c.last_polled_at).getTime() > STALE_MS)
     if (!stale.length) return
     for (const c of stale) await syncChannel(supabase, c.username, () => stockIndex(supabase), { maxPages: 2 })
@@ -128,7 +131,8 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
   async function resolveStock(stock: string): Promise<string | null> {
     const s = stock.trim()
     if (/^\d{6}$/.test(s)) return s
-    const { data } = await supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', await latestTradingDay(supabase)).eq('isu_nm', s).limit(1)
+    const day = await latestTradingDay(supabase)
+    const { data } = await step('resolve_stock', supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', day).eq('isu_nm', s).limit(1))
     return data?.[0]?.isu_cd ?? null
   }
 
@@ -183,7 +187,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
 
   async function myChannels(): Promise<string[]> {
     if (!userId) return []
-    const { data, error } = await supabase.from('user_channels').select('username').eq('user_id', userId)
+    const { data, error } = await step('user_channels', supabase.from('user_channels').select('username').eq('user_id', userId))
     if (error) throw new Error(error.message)
     return (data ?? []).map((r) => r.username)
   }
@@ -293,7 +297,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       annotations: { readOnlyHint: true },
     },
     async () => {
-      const { data, error } = await supabase.from('telegram_channel_stats').select('*').order('last_post', { ascending: false })
+      const { data, error } = await step('channel_stats', supabase.from('telegram_channel_stats').select('*').order('last_post', { ascending: false }))
       if (error) throw new Error(error.message)
       return json((data ?? []).map((c) => ({
         channel: c.username,
@@ -335,7 +339,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       let scope: string[] | null = null // null = every channel
       let scopeLabel: string
       if (name) {
-        const { data } = await supabase.from('telegram_channels').select('username').eq('username', name)
+        const { data } = await step('channel_exists', supabase.from('telegram_channels').select('username').eq('username', name))
         if (!data?.length) return json({ error: `t.me/${name} isn't collected yet. Call add_telegram_channel first.` })
         scope = [name]
         scopeLabel = name
@@ -361,7 +365,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       let q = supabase.from('telegram_messages').select(MSG_COLUMNS).gte('ts', sinceIso(since, 3))
       if (scope) q = q.in('username', scope)
       if (code) q = q.contains('stock_codes', [code])
-      const { data, error } = await q.order('ts', { ascending: false }).limit(limit)
+      const { data, error } = await step('messages', q.order('ts', { ascending: false }).limit(limit))
       if (error) throw new Error(error.message)
       return json({ scope: scopeLabel, count: data?.length ?? 0, posts: await present((data ?? []) as Msg[], max_chars) })
     },
@@ -388,7 +392,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       let q = supabase.from('telegram_messages').select(MSG_COLUMNS).gte('ts', sinceIso(since, 30))
       if (name) q = q.eq('username', name)
       for (const t of terms) q = q.ilike('text', `%${t.replace(/[\\%_]/g, (c) => '\\' + c)}%`)
-      const { data, error } = await q.order('ts', { ascending: false }).limit(limit)
+      const { data, error } = await step('search', q.order('ts', { ascending: false }).limit(limit))
       if (error) throw new Error(error.message)
 
       const snippet = (m: Msg) => {

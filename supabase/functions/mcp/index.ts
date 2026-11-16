@@ -14,6 +14,7 @@ import { z } from 'npm:zod@^4.3.6'
 import { createRemoteJWKSet, jwtVerify } from 'npm:jose@^5.9.6'
 import { kisGet, kisToken, num, sessionElapsed } from '../_shared/kis.ts'
 import { registerTelegramTools } from './telegram.ts'
+import { type Step, step, timeCall } from './timing.ts'
 import {
   analyze,
   charts,
@@ -41,7 +42,7 @@ const SHEET2_MIN_TRDVAL = 50_000_000_000 // 거래대금 500억원 이상
 // Same-day rows come from KIS snapshots (every 5 minutes during the session) and are provisional until KRX's
 // official data replaces them the next morning
 async function dataStatus(day: string) {
-  const { data, error } = await supabase.from('available_dates').select('final, as_of').eq('bas_dd', day)
+  const { data, error } = await step('data_status', supabase.from('available_dates').select('final, as_of').eq('bas_dd', day))
   if (error) throw new Error(error.message)
   const d = data?.[0]
   if (!d || d.final !== false) return { data_status: '확정치 (KRX official)' }
@@ -67,11 +68,11 @@ async function dataStatus(day: string) {
 
 // Live quote for one stock (KIS 주식현재가 시세), used by analyze_stock while the market is open
 async function liveQuote(code: string) {
-  const token = await kisToken(supabase)
-  const { output: o } = await kisGet(token, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+  const token = await step('kis_token', kisToken(supabase))
+  const { output: o } = await step('kis_quote', kisGet(token, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
     FID_COND_MRKT_DIV_CODE: 'J',
     FID_INPUT_ISCD: code,
-  })
+  }))
   return {
     as_of: kstTime(new Date().toISOString()),
     price: num(o.stck_prpr),
@@ -88,11 +89,11 @@ async function liveQuote(code: string) {
 }
 
 async function latestDate(): Promise<string | null> {
-  const { data, error } = await supabase
+  const { data, error } = await step('latest_date', supabase
     .from('prices')
     .select('bas_dd')
     .order('bas_dd', { ascending: false })
-    .limit(1)
+    .limit(1))
   if (error) throw new Error(error.message)
   return data?.[0]?.bas_dd ?? null
 }
@@ -107,7 +108,15 @@ type Caller = { userId: string | null; auth: 'oauth' | 'shared_key'; client: str
 
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined
 
-function logCall(caller: Caller, tool: string, args: unknown, started: number, result: unknown, err?: unknown) {
+function logCall(
+  caller: Caller,
+  tool: string,
+  args: unknown,
+  started: number,
+  steps: Step[],
+  result: unknown,
+  err?: unknown,
+) {
   const r = result as { isError?: boolean; content?: { text?: string }[] } | undefined
   const errorText = err
     ? String((err as Error)?.message ?? err)
@@ -124,6 +133,7 @@ function logCall(caller: Caller, tool: string, args: unknown, started: number, r
     error: errorText,
     latency_ms: Math.round(performance.now() - started),
     response_bytes: r?.content ? r.content.reduce((n, c) => n + (c.text?.length ?? 0), 0) : null,
+    timings: steps.length ? steps : null,
   }
   const p = supabase.from('tool_calls').insert(row).then(({ error }) => {
     if (error) console.error('tool_calls insert failed:', error.message)
@@ -150,18 +160,18 @@ function withLogging(server: McpServer, caller: Caller): McpServer {
       // Tools without an inputSchema are called with (ctx) only; the rest with (args, ctx).
       const args = config?.inputSchema ? a[0] : null
       const started = performance.now()
-      try {
-        const result = await cb(...a)
-        if (bench) {
-          const r = result as { _meta?: Record<string, unknown> }
-          return { ...r, _meta: { ...r._meta, latency_ms: Math.round(performance.now() - started) } }
-        }
-        logCall(caller, name, args, started, result)
-        return result
-      } catch (e) {
-        if (!bench) logCall(caller, name, args, started, undefined, e)
-        throw e
+      // Each call runs in its own timing context: step() calls below it record into this call's list
+      const run = await timeCall(() => cb(...a))
+      if (!run.ok) {
+        if (!bench) logCall(caller, name, args, started, run.steps, undefined, run.error)
+        throw run.error
       }
+      if (bench) {
+        const r = run.result as { _meta?: Record<string, unknown> }
+        return { ...r, _meta: { ...r._meta, latency_ms: Math.round(performance.now() - started), timings: run.steps } }
+      }
+      logCall(caller, name, args, started, run.steps, run.result)
+      return run.result
     })
   return server
 }
@@ -200,20 +210,20 @@ const handler = createMcpHandler((ctx) => {
       const day = date ? normDate(date) : await latestDate()
       if (!day) return json({ error: 'No data ingested yet.' })
 
-      const { data, error } = await supabase
+      const { data, error } = await step('movers', supabase
         .from('prices')
         .select('*')
         .eq('bas_dd', day)
         .gte('fluc_rt', SHEET2_MIN_RATE)
-        .order('fluc_rt', { ascending: false })
+        .order('fluc_rt', { ascending: false }))
       if (error) throw new Error(error.message)
 
       const rows = (data ?? []) as Row[]
       if (rows.length === 0) {
-        const { count } = await supabase
+        const { count } = await step('day_count', supabase
           .from('prices')
           .select('*', { count: 'exact', head: true })
-          .eq('bas_dd', day)
+          .eq('bas_dd', day))
         if (!count) {
           return json({
             date: day,
@@ -265,12 +275,12 @@ const handler = createMcpHandler((ctx) => {
       annotations: { readOnlyHint: true },
     },
     async ({ code, days }) => {
-      const { data, error } = await supabase
+      const { data, error } = await step('history', supabase
         .from('prices')
         .select('*')
         .eq('isu_cd', code)
         .order('bas_dd', { ascending: false })
-        .limit(days)
+        .limit(days))
       if (error) throw new Error(error.message)
       const rows = (data ?? []) as Row[]
       return json({
@@ -345,7 +355,7 @@ const handler = createMcpHandler((ctx) => {
       const day = a.date ? normDate(a.date) : await latestDate()
       if (!day) return json({ error: 'No data ingested yet.' })
 
-      const { data, error } = await supabase.rpc('screen_stocks', {
+      const { data, error } = await step('screen_stocks_rpc', supabase.rpc('screen_stocks', {
         p_date: day,
         p_market: a.market ?? null,
         p_include_untraded: a.include_untraded,
@@ -369,7 +379,7 @@ const handler = createMcpHandler((ctx) => {
         p_max_volatility: a.max_volatility ?? null,
         p_sort: a.sort,
         p_limit: a.limit,
-      })
+      }))
       if (error) throw new Error(error.message)
 
       const rows = (data ?? []) as Record<string, any>[]
@@ -446,12 +456,13 @@ const handler = createMcpHandler((ctx) => {
     async ({ stock, date, ...opts }) => {
       let code = stock.trim()
       if (!/^[0-9A-Z]{6}$/i.test(code)) {
-        const { data, error } = await supabase
+        const day = await latestDate()
+        const { data, error } = await step('find_name', supabase
           .from('prices')
           .select('isu_cd, isu_nm, market')
-          .eq('bas_dd', await latestDate())
+          .eq('bas_dd', day)
           .ilike('isu_nm', `%${code}%`)
-          .limit(20)
+          .limit(20))
         if (error) throw new Error(error.message)
         const exact = (data ?? []).find((r) => r.isu_nm === code)
         if (exact) code = exact.isu_cd
@@ -462,7 +473,7 @@ const handler = createMcpHandler((ctx) => {
 
       let q = supabase.from('prices').select('*').eq('isu_cd', code)
       if (date) q = q.lte('bas_dd', normDate(date))
-      const { data, error } = await q.order('bas_dd', { ascending: false }).limit(250)
+      const { data, error } = await step('history', q.order('bas_dd', { ascending: false }).limit(250))
       if (error) throw new Error(error.message)
       const rows = (data ?? []) as Row[]
       if (rows.length === 0) return json({ error: `No data for ${code}${date ? ` on or before ${normDate(date)}` : ''}.` })
@@ -489,12 +500,12 @@ const handler = createMcpHandler((ctx) => {
     },
     async ({ name }) => {
       const day = await latestDate()
-      const { data, error } = await supabase
+      const { data, error } = await step('find_name', supabase
         .from('prices')
         .select('isu_cd, isu_nm, market')
         .eq('bas_dd', day)
         .ilike('isu_nm', `%${name}%`)
-        .limit(20)
+        .limit(20))
       if (error) throw new Error(error.message)
       return json(data ?? [])
     },
@@ -520,9 +531,9 @@ const handler = createMcpHandler((ctx) => {
       if (date) {
         const day = normDate(date)
         const [hit, prev, next] = await Promise.all([
-          dates().eq('bas_dd', day),
-          dates().lt('bas_dd', day).order('bas_dd', { ascending: false }).limit(1),
-          dates().gt('bas_dd', day).order('bas_dd', { ascending: true }).limit(1),
+          step('date_hit', dates().eq('bas_dd', day)),
+          step('date_prev', dates().lt('bas_dd', day).order('bas_dd', { ascending: false }).limit(1)),
+          step('date_next', dates().gt('bas_dd', day).order('bas_dd', { ascending: true }).limit(1)),
         ])
         for (const r of [hit, prev, next]) if (r.error) throw new Error(r.error.message)
         if (hit.data?.length) {
@@ -538,9 +549,9 @@ const handler = createMcpHandler((ctx) => {
       }
 
       const [all, first, last] = await Promise.all([
-        supabase.from('available_dates').select('*', { count: 'exact', head: true }),
-        dates().order('bas_dd', { ascending: true }).limit(1),
-        dates().order('bas_dd', { ascending: false }).limit(1),
+        step('dates_count', supabase.from('available_dates').select('*', { count: 'exact', head: true })),
+        step('dates_first', dates().order('bas_dd', { ascending: true }).limit(1)),
+        step('dates_last', dates().order('bas_dd', { ascending: false }).limit(1)),
       ])
       for (const r of [all, first, last]) if (r.error) throw new Error(r.error.message)
       const lastDay = last.data?.[0]?.bas_dd ?? null

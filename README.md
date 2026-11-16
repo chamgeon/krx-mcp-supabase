@@ -97,7 +97,7 @@ Create a free project at https://supabase.com (Seoul region recommended) and not
 ```bash
 supabase login
 supabase link --project-ref <PROJECT_REF>
-supabase db push            # tables, indexes and the screen_stocks function
+supabase db push --remote   # tables, indexes and the screen_stocks function (CLI v3: plain `db push` targets the local stack)
 supabase config push        # verify_jwt = false for both functions
 ```
 
