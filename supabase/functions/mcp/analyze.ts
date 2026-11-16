@@ -102,8 +102,16 @@ export function analyze(
   const ret = (k: number) => (n > k ? pct(close[0], close[k]) : null)
   const returns = { d1: ret(1), d5: ret(5), d10: ret(10), d20: ret(20), d60: ret(60), d120: ret(120) }
 
-  // Trading value
-  const avgPrior = (i: number, k: number) => (n >= i + 1 + k ? mean(trdval.slice(i + 1, i + 1 + k)) : null)
+  // Trading value. Averages use the prior days that exist (up to k), so new listings get ratios too, like
+  // screen_stocks; avg_prior_days says how many days an average is based on.
+  const priorDays = Math.min(n - 1, opts.avg_days)
+  if (priorDays < opts.avg_days) {
+    signals.push({
+      code: 'SHORT_HISTORY',
+      detail: `거래 이력 ${n}일 (신규상장 등) — 평균·비율은 직전 ${priorDays}일 기준, 돌파는 기간이 다 찰 때까지 판단 안 함`,
+    })
+  }
+  const avgPrior = (i: number, k: number) => mean(trdval.slice(i + 1, i + 1 + k))
   const avgN = avgPrior(0, opts.avg_days)
   const avg5 = avgPrior(0, 5)
   const ratio = avgN ? round(trdval[0] / avgN) : null
@@ -116,14 +124,14 @@ export function analyze(
       spikes.push({ date: rows[i].bas_dd, trdval_eok: eok(trdval[i]), ratio: round(trdval[i] / a), fluc_rt: rows[i].fluc_rt })
     }
   }
-  const volAvgN = n >= 1 + opts.avg_days ? mean(volume.slice(1, 1 + opts.avg_days)) : null
-  const volAvg5 = n >= 6 ? mean(volume.slice(1, 6)) : null
+  const volAvgN = mean(volume.slice(1, 1 + opts.avg_days))
+  const volAvg5 = mean(volume.slice(1, 6))
   const volRatio = volAvgN ? round(volume[0] / volAvgN) : null
   if (ratio != null && ratio >= opts.spike_ratio) {
-    signals.push({ code: 'TRDVAL_SPIKE', detail: `거래대금이 직전 ${opts.avg_days}일 평균의 ${ratio}배` })
+    signals.push({ code: 'TRDVAL_SPIKE', detail: `거래대금이 직전 ${priorDays}일 평균의 ${ratio}배` })
   }
   if (volRatio != null && volRatio >= opts.spike_ratio) {
-    signals.push({ code: 'VOLUME_SPIKE', detail: `거래량이 직전 ${opts.avg_days}일 평균의 ${volRatio}배` })
+    signals.push({ code: 'VOLUME_SPIKE', detail: `거래량이 직전 ${priorDays}일 평균의 ${volRatio}배` })
   }
   if (trdvalUp >= 3) signals.push({ code: 'TRDVAL_RISING_STREAK', detail: `거래대금 ${trdvalUp}일 연속 증가` })
 
@@ -147,17 +155,23 @@ export function analyze(
     if (p5 >= p20 && m5 < m20) signals.push({ code: 'DEAD_CROSS_5_20', detail: 'MA5가 오늘 MA20을 하향 돌파' })
   }
 
-  // Breakouts: close > highest high of the prior k days
+  // Breakouts: close > highest high of the prior k days. With fewer than k prior days (new listing) the high is over
+  // the days that exist and breakout is null, as in screen_stocks: a new high since listing isn't a k-day breakout.
   const breakouts = Object.fromEntries(
     [20, 60, 120].map((k) => {
-      if (n <= k) return [`d${k}`, null]
       const prior = rows.slice(1, k + 1).filter(traded)
       if (prior.length === 0) return [`d${k}`, null]
       const hi = Math.max(...prior.map((r) => r.high!))
       const lo = Math.min(...prior.map((r) => r.low!))
-      const broke = traded(t) && close[0] > hi
+      const broke = n > k ? traded(t) && close[0] > hi : null
       if (broke) signals.push({ code: `BREAKOUT_${k}D`, detail: `종가가 직전 ${k}일 최고가(${hi}) 돌파` })
-      return [`d${k}`, { prior_high: hi, prior_low: lo, breakout: broke, close_vs_high_pct: pct(close[0], hi) }]
+      return [`d${k}`, {
+        prior_high: hi,
+        prior_low: lo,
+        prior_days: Math.min(n - 1, k),
+        breakout: broke,
+        close_vs_high_pct: pct(close[0], hi),
+      }]
     }),
   )
 
@@ -227,6 +241,7 @@ export function analyze(
     returns_pct: returns,
     trading_value: {
       today_eok: eok(trdval[0]),
+      avg_prior_days: priorDays,
       avg5_prior_eok: eok(avg5),
       [`avg${opts.avg_days}_prior_eok`]: eok(avgN),
       ratio_vs_avg: ratio,

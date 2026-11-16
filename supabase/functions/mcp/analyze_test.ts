@@ -80,15 +80,38 @@ Deno.test('short history (new listing): long-window metrics are null, never NaN'
   assertEquals(r.returns_pct.d5, null)
   assertEquals(r.returns_pct.d120, null)
   assertEquals((r.moving_averages as Record<string, unknown>).ma20, { value: null, close_vs_ma_pct: null, slope_5d_pct: null })
-  assertEquals(r.breakouts.d20, null)
   assertEquals(r.consolidation, null)
-  assertEquals(r.trading_value.ratio_vs_avg, null)
+  // averages use the 4 prior days that exist; breakouts aren't called without a full window
+  assertEquals(r.trading_value.avg_prior_days, 4)
+  assertEquals(r.trading_value.ratio_vs_avg, 1)
+  assertEquals(r.breakouts.d20?.prior_days, 4)
+  assertEquals(r.breakouts.d20?.breakout, null)
+  assert(codes(r).includes('SHORT_HISTORY'))
   assertEquals(badNumbers(r), [])
 })
 
-Deno.test('single row does not crash', () => {
+Deno.test('new listing (IPO): spike is measured against the days since listing, no breakout yet', () => {
+  // 10 trading days since listing; on the last day 거래대금 is 4× the prior average and the close is a new high
+  const r = analyze(makeRows([...flat(9), { close: 120, trdval: 40_000_000_000 }]), OPTS)
+  assertEquals(r.trading_value.avg_prior_days, 9)
+  assertEquals(r.trading_value.ratio_vs_avg, 4)
+  assert(codes(r).includes('TRDVAL_SPIKE'))
+  assertEquals(r.signals.find((s) => s.code === 'TRDVAL_SPIKE')?.detail, '거래대금이 직전 9일 평균의 4배')
+  assertEquals(r.breakouts.d20?.prior_high, 101) // high since listing, still reported
+  assertEquals(r.breakouts.d20?.breakout, null)
+  assert(!codes(r).some((c) => c.startsWith('BREAKOUT_')))
+  assert(codes(r).includes('SHORT_HISTORY'))
+})
+
+Deno.test('full history: no SHORT_HISTORY signal', () => {
+  assert(!codes(analyze(makeRows(flat(30)), OPTS)).includes('SHORT_HISTORY'))
+})
+
+Deno.test('single row (listing day) does not crash', () => {
   const r = analyze(makeRows([{ close: 100 }]), OPTS)
   assertEquals(r.history_days, 1)
+  assertEquals(r.trading_value.ratio_vs_avg, null) // no prior day to compare with
+  assertEquals(r.breakouts.d20, null)
   assertEquals(badNumbers(r), [])
 })
 
@@ -120,7 +143,8 @@ Deno.test('20-day breakout: close above the prior 20-day high', () => {
   assertEquals(r.breakouts.d20?.breakout, true)
   assertEquals(r.breakouts.d20?.prior_high, 101)
   assert(codes(r).includes('BREAKOUT_20D'))
-  assertEquals(r.breakouts.d60, null) // only 31 days of history
+  assertEquals(r.breakouts.d60?.breakout, null) // only 31 days of history: high reported, no 60-day call
+  assert(!codes(r).includes('BREAKOUT_60D'))
 })
 
 Deno.test('no breakout when the close only matches the prior high', () => {

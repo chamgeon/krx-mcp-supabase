@@ -417,7 +417,8 @@ const handler = createMcpHandler((ctx) => {
         '1/5/10/20/60/120 days, 거래대금 and 거래량 vs prior averages, recent 거래대금 spikes, MA5/20/60/120 with alignment and 5/20 crosses, ' +
         '20/60/120-day breakouts (close > prior N-day high), volatility (stddev of 등락률, ATR14), up/down streaks, ' +
         'consolidation box and price vs trading value divergence, plus a list of triggered signals. ' +
-        'Metrics needing more history than is loaded are null. ' +
+        'Metrics needing more history than is loaded are null. For new listings (SHORT_HISTORY signal), averages and ' +
+        'ratios use the prior days that exist (avg_prior_days), and N-day breakouts stay null until N prior days exist. ' +
         'While the market is open (09:00–15:30 KST) it also returns live_quote, a real-time KIS quote; ' +
         'the analysis itself uses the latest 5-minute snapshot (see as_of).',
       inputSchema: z.object({
