@@ -26,7 +26,10 @@ jobs:
     steps:
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          # Pinned: "latest" makes the action query the GitHub API, which fails on rate limits (2026-11-16 run),
+          # and a new major CLI could change `db dump` without notice. Bump deliberately, after testing the three
+          # dump commands below locally (v3.1.0 tested 2026-11-16).
+          version: 3.1.0
 
       - name: Dump database
         env:
