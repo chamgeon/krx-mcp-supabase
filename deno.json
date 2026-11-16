@@ -2,6 +2,7 @@
   "lock": false,
   "tasks": {
     "test": "deno test --allow-env supabase/functions",
-    "test:db": "deno test --allow-env --allow-net=127.0.0.1,localhost supabase/tests"
+    "test:db": "deno test --allow-env --allow-net=127.0.0.1,localhost supabase/tests/db_test.ts",
+    "test:mcp": "deno test --allow-env --allow-net=127.0.0.1,localhost supabase/tests/mcp_test.ts"
   }
 }

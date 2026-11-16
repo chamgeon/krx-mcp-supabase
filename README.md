@@ -208,6 +208,28 @@ Example prompt:
 > Sheet 1/2는 툴 결과 그대로 쓰고, 각 종목마다 웹 검색으로 "왜 올랐는지"를 상세하게 적어줘
 > (재료/뉴스, 공시, 테마, 수급). Sheet 3에는 차트 URL을 넣어줘.
 
+## Tests
+
+Three suites, from fastest to most complete. None of them touch production, KIS, KRX or Telegram.
+
+| Command | What | Needs |
+|---|---|---|
+| `deno task test` | Unit tests next to the code (`*_test.ts`): `analyze()`, Telegram parsing and stock tagging, KIS helpers | nothing |
+| `deno task test:db` | `screen_stocks`, the `prices` / `available_dates` views, the `trading_days` triggers, and `screen_stocks` vs. `analyze()` agreement (`supabase/tests/db_test.ts`) | local stack |
+| `deno task test:mcp` | Every MCP tool over HTTP with the official MCP client, auth (401, `?key=`, a real user token), usage logging (`supabase/tests/mcp_test.ts`) | local stack + served function |
+
+```sh
+open -a Docker                  # Docker Desktop runs the local stack
+supabase start                  # local Postgres/Auth/Edge runtime; applies migrations and supabase/seed.sql
+supabase functions serve mcp --env-file supabase/tests/functions.env   # second terminal, for test:mcp
+deno task test && deno task test:db && deno task test:mcp
+supabase stop                   # when done
+```
+
+The local database holds only `supabase/seed.sql`: made-up stocks (codes 9000xx), each shaped to trigger one signal,
+plus two Telegram channels. `supabase db reset` restores it. `supabase/tests/functions.env` holds dummy keys only;
+never serve tests with `supabase/.env`, which has the real ones.
+
 ## Backups
 
 The free plan has no backups, so `.github/workflows/backup.yml` runs every Monday at 03:00 KST (or by hand: Actions →

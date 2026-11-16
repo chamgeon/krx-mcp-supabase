@@ -56,14 +56,14 @@ Deno.test({
   fn: async () => {
     const { data, error } = await db.from('daily_prices').select('isu_cd').eq('bas_dd', DAY)
     assert(!error, `can't reach the local DB (${error?.message}). Run: supabase start`)
-    assertEquals(data?.length, 7, 'seed not loaded. Run: supabase db reset')
+    assertEquals(data?.length, 9, 'seed not loaded or outdated. Run: supabase db reset')
   },
 })
 
 // ---- screen_stocks filters ------------------------------------------------------------------------
 
 Deno.test('default: every traded stock, the halted one excluded', async () => {
-  assertEquals(codes(await screen()), ['900001', '900002', '900003', '900005', '900006', '900007'])
+  assertEquals(codes(await screen()), ['900001', '900002', '900003', '900005', '900006', '900007', '900008', '900009'])
 })
 
 Deno.test('include_untraded adds the halted stock, with no breakout', async () => {
@@ -76,18 +76,18 @@ Deno.test('include_untraded adds the halted stock, with no breakout', async () =
 })
 
 Deno.test('market filter', async () => {
-  assertEquals(codes(await screen({ p_market: 'KOSDAQ' })), ['900002', '900006'])
+  assertEquals(codes(await screen({ p_market: 'KOSDAQ' })), ['900002', '900006', '900008'])
 })
 
 Deno.test('fluc_rt and mktcap filters', async () => {
-  assertEquals(codes(await screen({ p_min_fluc_rt: 5 })), ['900001', '900007'])
+  assertEquals(codes(await screen({ p_min_fluc_rt: 5 })), ['900001', '900007', '900008', '900009'])
   assertEquals(codes(await screen({ p_min_mktcap: 500_000_000_000 })), ['900001'])
 })
 
 Deno.test('breakouts over 20, 60 and 120 days', async () => {
-  // 돌파전자 jumps out of a flat range; 상승제약 rises every day, so it also closes above every prior high
+  // 돌파전자 / 급등테크 / 대형강세 jump out of a flat range; 상승제약 rises every day, so it also closes above every prior high
   const rows = await screen({ p_breakout_days: [20, 60, 120] })
-  assertEquals(codes(rows), ['900001', '900005'])
+  assertEquals(codes(rows), ['900001', '900005', '900008', '900009'])
   const b = rows.find((r) => r.isu_cd === '900001')!
   assertEquals([b.high_20, b.breakout_20, b.breakout_60, b.breakout_120], [10100, true, true, true])
 })
@@ -113,9 +113,10 @@ Deno.test('up streaks are capped at the short window (20 days)', async () => {
 })
 
 Deno.test('volatility filter', async () => {
-  // 변동금속 swings ±5% daily; 박스화학 jumped +34% into its box 19 days ago, which is inside the 20-day window
+  // 변동금속 swings ±5% daily; 박스화학 jumped +34% into its box 19 days ago and 급등테크 +30% today, both inside the
+  // 20-day window
   const rows = await screen({ p_min_volatility: 4 })
-  assertEquals(codes(rows), ['900003', '900007'])
+  assertEquals(codes(rows), ['900003', '900007', '900008'])
   const v = rows.find((r) => r.isu_cd === '900007')!.volatility!
   assert(v > 4 && v < 6, `volatility ${v}`)
 })
@@ -190,7 +191,7 @@ Deno.test('prices view hides live rows for days KRX already published', async ()
 Deno.test('available_dates: final KRX day vs. provisional KIS day', async () => {
   const { data, error } = await db.from('available_dates').select('*').in('bas_dd', [DAY, LIVE_DAY]).order('bas_dd')
   if (error) throw new Error(error.message)
-  assertEquals(data!.map((d) => [d.bas_dd, d.row_count, d.final]), [[DAY, 7, true], [LIVE_DAY, 6, false]])
+  assertEquals(data!.map((d) => [d.bas_dd, d.row_count, d.final]), [[DAY, 9, true], [LIVE_DAY, 8, false]])
   assert(data![1].as_of, 'provisional day should have as_of')
 })
 

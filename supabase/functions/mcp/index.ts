@@ -557,10 +557,14 @@ const handler = createMcpHandler((ctx) => {
 // The old shared ?key= URL keeps working during the transition and is logged as auth = 'shared_key'.
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
-const AUTH_ISSUER = `${SUPABASE_URL}/auth/v1`
-const MCP_URL = `${SUPABASE_URL}/functions/v1/mcp`
+// The URL clients see, used as the token issuer and in the metadata. Same as SUPABASE_URL in production; only the
+// local stack differs (functions reach Supabase at http://kong:8000, tokens are issued for http://127.0.0.1:54321),
+// so tests set PUBLIC_SUPABASE_URL (supabase/tests/functions.env).
+const PUBLIC_URL = Deno.env.get('PUBLIC_SUPABASE_URL') ?? SUPABASE_URL
+const AUTH_ISSUER = `${PUBLIC_URL}/auth/v1`
+const MCP_URL = `${PUBLIC_URL}/functions/v1/mcp`
 const RESOURCE_METADATA_URL = `${MCP_URL}/.well-known/oauth-protected-resource`
-const jwks = createRemoteJWKSet(new URL(`${AUTH_ISSUER}/.well-known/jwks.json`))
+const jwks = createRemoteJWKSet(new URL(`${SUPABASE_URL}/auth/v1/.well-known/jwks.json`))
 // The only scope we ask for: a refresh token, so users don't log in again when the ~1 h access token expires.
 // Without this hint clients request everything Supabase supports (openid profile email phone ...), none of which
 // the server reads; the access token alone identifies the user.
