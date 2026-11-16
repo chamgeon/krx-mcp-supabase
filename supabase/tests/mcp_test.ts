@@ -36,9 +36,9 @@ function test(name: string, fn: () => Promise<void>) {
   Deno.test({ name, fn, sanitizeResources: false, sanitizeOps: false })
 }
 
-async function connect(auth: { key: string } | { token: string }): Promise<Client> {
+async function connect(auth: { key: string } | { token: string }, userAgent?: string): Promise<Client> {
   const url = new URL(MCP)
-  const headers: Record<string, string> = {}
+  const headers: Record<string, string> = userAgent ? { 'User-Agent': userAgent } : {}
   if ('key' in auth) url.searchParams.set('key', auth.key)
   else headers.Authorization = `Bearer ${auth.token}`
   const client = new Client({ name: 'krx-mcp-tests', version: '1.0.0' })
@@ -365,6 +365,36 @@ test('every call is logged to tool_calls (shared key and OAuth)', async () => {
   await me.close()
   const row2 = await waitForLog((q) => q.eq('args->>name', marker2))
   assertEquals([row2.auth, row2.user_id], ['oauth', id])
+})
+
+test('benchmark calls (shared key + krx-bench/ User-Agent) get _meta.latency_ms and are not logged', async () => {
+  const bench = await connect({ key: KEY }, 'krx-bench/test-run')
+  const marker = `benchcheck-${crypto.randomUUID()}`
+  const r = await bench.callTool({ name: 'find_stock', arguments: { name: marker } }) as { _meta?: { latency_ms?: unknown } }
+  await bench.close()
+  assert(typeof r._meta?.latency_ms === 'number', `no _meta.latency_ms: ${JSON.stringify(r._meta)}`)
+  // A normal call made after it is logged; by then the benchmark call's row would be there too, if it were written
+  const after = `logcheck-${crypto.randomUUID()}`
+  await call('find_stock', { name: after })
+  await waitForLog((q) => q.eq('args->>name', after))
+  const { data } = await admin.from('tool_calls').select('id').eq('args->>name', marker)
+  assertEquals(data, [])
+})
+
+test('normal calls carry no _meta', async () => {
+  const r = await (await keyClient()).callTool({ name: 'find_stock', arguments: { name: '바이오' } }) as { _meta?: unknown }
+  assertEquals(r._meta, undefined)
+})
+
+test('a logged-in user with a krx-bench/ User-Agent is still logged', async () => {
+  const { token, id } = await testUser()
+  const me = await connect({ token }, 'krx-bench/spoof')
+  const marker = `logcheck-${crypto.randomUUID()}`
+  const r = await me.callTool({ name: 'find_stock', arguments: { name: marker } }) as { _meta?: unknown }
+  await me.close()
+  assertEquals(r._meta, undefined)
+  const row = await waitForLog((q) => q.eq('args->>name', marker))
+  assertEquals([row.auth, row.user_id, row.client], ['oauth', id, 'krx-bench/spoof'])
 })
 
 // Close the shared client last so its stream doesn't outlive the tests

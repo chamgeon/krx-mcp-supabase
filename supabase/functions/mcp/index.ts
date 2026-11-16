@@ -131,8 +131,16 @@ function logCall(caller: Caller, tool: string, args: unknown, started: number, r
   if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(Promise.resolve(p))
 }
 
-// Wraps server.registerTool so every handler registered on this server is logged.
+// Benchmark calls (scripts/bench.ts): the shared key plus a krx-bench/ User-Agent. They aren't logged, so tool_calls
+// holds real usage only; instead the result carries the same latency_ms in _meta (ignored by MCP clients) for the
+// benchmark to read. A logged-in user is never treated as a benchmark.
+function isBenchmark(caller: Caller): boolean {
+  return caller.auth === 'shared_key' && (caller.client?.startsWith('krx-bench/') ?? false)
+}
+
+// Wraps server.registerTool so every handler registered on this server is logged (or timed, for benchmarks).
 function withLogging(server: McpServer, caller: Caller): McpServer {
+  const bench = isBenchmark(caller)
   // deno-lint-ignore no-explicit-any
   const register = server.registerTool.bind(server) as (...a: any[]) => any
   // deno-lint-ignore no-explicit-any
@@ -144,10 +152,14 @@ function withLogging(server: McpServer, caller: Caller): McpServer {
       const started = performance.now()
       try {
         const result = await cb(...a)
+        if (bench) {
+          const r = result as { _meta?: Record<string, unknown> }
+          return { ...r, _meta: { ...r._meta, latency_ms: Math.round(performance.now() - started) } }
+        }
         logCall(caller, name, args, started, result)
         return result
       } catch (e) {
-        logCall(caller, name, args, started, undefined, e)
+        if (!bench) logCall(caller, name, args, started, undefined, e)
         throw e
       }
     })
