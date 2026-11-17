@@ -85,3 +85,37 @@ export function krxDayProblems(kospi: PriceRow[], kosdaq: PriceRow[], prevTotal:
   problems.push(...rowProblems([...kospi, ...kosdaq], { minRows, extraNumeric: ['mktcap', 'list_shrs'] }))
   return problems
 }
+
+export type KisCheck = {
+  compared: number // stocks in both KIS's last snapshot and KRX's official day
+  close_mismatch: number // of those, closes that differ
+  only_kis: number // in KIS's snapshot, not in KRX's day (e.g. delisted)
+  only_krx: number // in KRX's day, not in KIS's snapshot (KIS uses the previous day's stock list: new listings)
+  examples: string[] // up to 5 differing closes, "005930 70000→70100" (KIS → KRX)
+}
+
+/**
+ * How KIS's last provisional snapshot of a day compares with KRX's official data for it, by close. Run before the KIS
+ * rows are replaced: a systematic difference would mean the intraday numbers users see are off. 거래량/거래대금 are not
+ * compared: after-hours trading changes them legitimately.
+ */
+export function compareKisKrx(kis: { isu_cd: string; close: number | null }[], krx: PriceRow[]): KisCheck {
+  const official = new Map(krx.map((r) => [r.isu_cd, r.close]))
+  const check: KisCheck = { compared: 0, close_mismatch: 0, only_kis: 0, only_krx: 0, examples: [] }
+  const seen = new Set<string>()
+  for (const k of kis) {
+    seen.add(k.isu_cd)
+    if (!official.has(k.isu_cd)) {
+      check.only_kis++
+      continue
+    }
+    check.compared++
+    const close = official.get(k.isu_cd)
+    if (Number(k.close) !== Number(close)) {
+      check.close_mismatch++
+      if (check.examples.length < 5) check.examples.push(`${k.isu_cd} ${k.close}→${close}`)
+    }
+  }
+  check.only_krx = krx.filter((r) => !seen.has(r.isu_cd)).length
+  return check
+}

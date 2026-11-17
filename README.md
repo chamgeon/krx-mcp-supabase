@@ -117,6 +117,15 @@ supabase secrets set \
   MCP_ACCESS_KEY=<random string 2>
 ```
 
+For pipeline alerts and the daily report on Telegram: create a bot with @BotFather, send it any message, read your chat
+id from `https://api.telegram.org/bot<TOKEN>/getUpdates` (`message.chat.id`), then:
+
+```bash
+supabase secrets set TELEGRAM_BOT_TOKEN=<bot token> TELEGRAM_CHAT_ID=<chat id>
+```
+
+Without them nothing is sent (the message goes to the function logs).
+
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided to Edge Functions automatically.
 
 ### 4. Deploy the functions
@@ -126,6 +135,7 @@ supabase functions deploy kis-ingest
 supabase functions deploy krx-ingest
 supabase functions deploy telegram-ingest
 supabase functions deploy mcp
+supabase functions deploy pipeline-report
 ```
 
 Each deploy reads `[functions.<name>] verify_jwt = false` from `supabase/config.toml`: the ingest functions check their

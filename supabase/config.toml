@@ -11,3 +11,6 @@ verify_jwt = false
 
 [functions.telegram-ingest]
 verify_jwt = false
+
+[functions.pipeline-report]
+verify_jwt = false

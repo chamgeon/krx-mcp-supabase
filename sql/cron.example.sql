@@ -15,6 +15,9 @@
 --               weekday from the last 7 days that still has no KRX data.
 --   telegram-ingest  every 5 min, daily
 --               new posts from every collected public Telegram channel (one request per channel).
+--   pipeline-report  18:00 KST          (09:00 UTC)              daily
+--               Telegram report of the last 24 h of ingest runs (needs the TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
+--               secrets). Already set up? Add only this job.
 --
 -- Migrating from the KRX-only schedule? Remove the old jobs first:
 --   select cron.unschedule('krx-ingest-close');
@@ -86,6 +89,20 @@ select cron.schedule(
   $$
 );
 
+select cron.schedule(
+  'pipeline-report',
+  '0 9 * * *',
+  $$
+  select net.http_post(
+    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/pipeline-report',
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-ingest-secret', '<INGEST_SECRET>'),
+    body := '{}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $$
+);
+
+-- Ingest runs:  select * from ingest_runs order by started_at desc limit 20;
 -- Check runs:   select * from cron.job_run_details order by start_time desc limit 10;
 -- HTTP results: select * from net._http_response order by created desc limit 10;
 -- Remove:       select cron.unschedule('kis-ingest-intraday');
@@ -93,3 +110,4 @@ select cron.schedule(
 --               select cron.unschedule('kis-ingest-after-hours');
 --               select cron.unschedule('krx-ingest-morning');
 --               select cron.unschedule('telegram-ingest');
+--               select cron.unschedule('pipeline-report');

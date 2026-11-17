@@ -7,6 +7,7 @@ import {
   forgetKisToken,
   isTokenRejected,
   KisError,
+  kisGet,
   kisToken,
   num,
   sessionElapsed,
@@ -100,4 +101,27 @@ Deno.test('isTokenRejected: only KIS token errors', () => {
   assert(isTokenRejected(new KisError('x', 401, null)))
   assert(!isTokenRejected(new KisError('x', 500, 'EGW00201'))) // rate limit
   assert(!isTokenRejected(new Error('network')))
+})
+
+Deno.test('kisGet: a rate-limited request waits, reports the wait, and retries', async () => {
+  const realFetch = globalThis.fetch
+  const answers = [{ rt_cd: '1', msg_cd: 'EGW00201', msg1: '초당 거래건수를 초과하였습니다.' }, { rt_cd: '0', output: { stck_prpr: '1000' } }]
+  let requests = 0
+  globalThis.fetch = () => Promise.resolve(Response.json(answers[requests++]))
+  try {
+    const waits: number[] = []
+    const body = await kisGet('token', '/path', 'TR', {}, {
+      onRateLimited: async (wait) => {
+        const t0 = performance.now()
+        await wait
+        waits.push(performance.now() - t0)
+      },
+    })
+    assertEquals(body.output.stck_prpr, '1000')
+    assertEquals(requests, 2)
+    assertEquals(waits.length, 1)
+    assert(waits[0] >= 900, `waited ${waits[0]} ms`)
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })

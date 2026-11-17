@@ -128,6 +128,9 @@ async function liveQuote(code: string, stored: Promise<StoredToken | null>) {
     step('kis_quote', kisGet(token, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
       FID_COND_MRKT_DIV_CODE: 'J',
       FID_INPUT_ISCD: code,
+    }, {
+      // a wait after KIS's per-second limit (shared with kis-ingest) shows as its own step inside kis_quote
+      onRateLimited: (wait) => step('kis_rate_limited', wait),
     }))
   const s = await stored
   const token = isUsable(s) ? s.access_token : await step('kis_token_issue', kisToken(supabase, stored))

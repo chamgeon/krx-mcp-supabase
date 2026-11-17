@@ -10,6 +10,7 @@
 import { assert, assertEquals } from 'jsr:@std/assert@1'
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { analyze, type Row } from '../functions/mcp/analyze.ts'
+import { monitored } from '../functions/_shared/ops.ts'
 
 const URL = Deno.env.get('LOCAL_SUPABASE_URL') ?? 'http://127.0.0.1:54321'
 // The service role key every local Supabase stack uses (public demo value, not a secret)
@@ -317,4 +318,95 @@ Deno.test({
       await restoreChannel()
     }
   },
+})
+
+// ---- ingest run record and failure alerts (functions/_shared/ops.ts) --------------------------------------------
+
+// Runs `monitored` against the local DB with Telegram's API stubbed (only api.telegram.org; the DB client keeps the
+// real fetch). Returns the alerts that would have been sent.
+async function withTelegramStub<T>(fn: () => Promise<T>): Promise<{ result: T; alerts: string[] }> {
+  const alerts: string[] = []
+  const realFetch = globalThis.fetch
+  // (URL is this file's local Supabase address, so the URL class isn't named here)
+  globalThis.fetch = (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input)
+    if (!url.startsWith('https://api.telegram.org/')) return realFetch(input, init)
+    alerts.push(JSON.parse(String(init?.body)).text)
+    return Promise.resolve(Response.json({ ok: true }))
+  }
+  Deno.env.set('TELEGRAM_BOT_TOKEN', 'test-token')
+  Deno.env.set('TELEGRAM_CHAT_ID', '1')
+  try {
+    return { result: await fn(), alerts }
+  } finally {
+    globalThis.fetch = realFetch
+    Deno.env.delete('TELEGRAM_BOT_TOKEN')
+    Deno.env.delete('TELEGRAM_CHAT_ID')
+  }
+}
+
+async function runsOf(job: string) {
+  const { data, error } = await db.from('ingest_runs').select('*').eq('job', job).order('id')
+  if (error) throw new Error(error.message)
+  return data!
+}
+
+Deno.test('monitored: a run is recorded with its answer; a request without the secret is not', async () => {
+  const job = `test-${crypto.randomUUID()}`
+  try {
+    const ok = monitored(job, db, () => Promise.resolve(Response.json({ date: '20261117', rows: 2771 })))
+    const unauthorized = monitored(job, db, () => Promise.resolve(new Response('unauthorized', { status: 401 })))
+    const { alerts } = await withTelegramStub(async () => {
+      assertEquals((await ok(new Request('http://x'))).status, 200)
+      assertEquals((await unauthorized(new Request('http://x'))).status, 401)
+    })
+    const runs = await runsOf(job)
+    assertEquals(runs.length, 1)
+    assertEquals([runs[0].ok, runs[0].status, runs[0].summary, runs[0].error, runs[0].alerted],
+      [true, 200, { date: '20261117', rows: 2771 }, null, false])
+    assert(Number.isInteger(runs[0].ms))
+    assertEquals(alerts, [])
+  } finally {
+    await db.from('ingest_runs').delete().eq('job', job)
+  }
+})
+
+Deno.test('monitored: a failure alerts once per hour; a thrown error is a failed run', async () => {
+  const job = `test-${crypto.randomUUID()}`
+  try {
+    const failing = monitored(job, db, () => Promise.resolve(Response.json({ error: 'refused snapshot: test' }, { status: 500 })))
+    const throwing = monitored(job, db, () => Promise.reject(new Error('boom')))
+    const { alerts } = await withTelegramStub(async () => {
+      assertEquals((await failing(new Request('http://x'))).status, 500)
+      assertEquals((await failing(new Request('http://x'))).status, 500) // within the hour: recorded, no alert
+      assertEquals((await throwing(new Request('http://x'))).status, 500) // the answer is a 500, not an exception
+    })
+    const runs = await runsOf(job)
+    assertEquals(runs.map((r) => [r.ok, r.error, r.alerted]), [
+      [false, 'refused snapshot: test', true],
+      [false, 'refused snapshot: test', false],
+      [false, 'boom', false],
+    ])
+    assertEquals(alerts.length, 1)
+    assert(alerts[0].includes(`❌ ${job} failed`) && alerts[0].includes('refused snapshot: test'), alerts[0])
+
+    // an hour later, the next failure alerts again
+    await db.from('ingest_runs').update({ started_at: new Date(Date.now() - 2 * 3600_000).toISOString() }).eq('job', job)
+    const { alerts: later } = await withTelegramStub(() => failing(new Request('http://x')))
+    assertEquals(later.length, 1)
+  } finally {
+    await db.from('ingest_runs').delete().eq('job', job)
+  }
+})
+
+Deno.test('monitored: without the Telegram secrets the failure is still recorded, just not alerted', async () => {
+  const job = `test-${crypto.randomUUID()}`
+  try {
+    const failing = monitored(job, db, () => Promise.resolve(Response.json({ error: 'x' }, { status: 500 })))
+    await failing(new Request('http://x'))
+    const runs = await runsOf(job)
+    assertEquals(runs.map((r) => [r.ok, r.alerted]), [[false, false]])
+  } finally {
+    await db.from('ingest_runs').delete().eq('job', job)
+  }
 })

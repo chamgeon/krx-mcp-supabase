@@ -9,7 +9,8 @@
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2'
-import { krxDayProblems, krxItems, parseKrxRows, type PriceRow, toIsoDate } from './parse.ts'
+import { compareKisKrx, type KisCheck, krxDayProblems, krxItems, parseKrxRows, type PriceRow, toIsoDate } from './parse.ts'
+import { monitored } from '../_shared/ops.ts'
 
 const KRX_BASE = 'https://data-dbg.krx.co.kr/svc/apis/sto'
 const MARKETS = [
@@ -50,7 +51,19 @@ async function fetchMarket(path: string, basDd: string): Promise<Record<string, 
   return krxItems(await res.json())
 }
 
-async function ingestDay(basDd: string): Promise<number> {
+// KIS's provisional rows for a day (its last snapshot), to compare with KRX's before they're replaced
+async function kisRowsOf(dayIso: string): Promise<{ isu_cd: string; close: number | null }[]> {
+  const out: { isu_cd: string; close: number | null }[] = []
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from('live_prices').select('isu_cd, close').eq('bas_dd', dayIso)
+      .order('isu_cd').range(from, from + 999)
+    if (error) throw new Error(error.message)
+    out.push(...(data ?? []))
+    if (!data || data.length < 1000) return out
+  }
+}
+
+async function ingestDay(basDd: string): Promise<{ rows: number; kisCheck: KisCheck | null }> {
   const byMarket: PriceRow[][] = []
   for (const { market, path } of MARKETS) byMarket.push(parseKrxRows(await fetchMarket(path, basDd), market, basDd))
   const [kospi, kosdaq] = byMarket
@@ -59,6 +72,9 @@ async function ingestDay(basDd: string): Promise<number> {
   const problems = krxDayProblems(kospi, kosdaq, await previousDayCount(toIsoDate(basDd)))
   if (problems.length) throw new Error(`refused ${basDd}: ${problems.join('; ')}`)
   const rows = [...kospi, ...kosdaq]
+  // Before KRX's numbers replace KIS's, compare them (the report shows the result)
+  const kisRows = rows.length ? await kisRowsOf(toIsoDate(basDd)) : []
+  const kisCheck = kisRows.length ? compareKisKrx(kisRows, rows) : null
   // Empty = holiday, or KRX hasn't published that day yet
   for (let i = 0; i < rows.length; i += 1000) {
     const { error } = await supabase
@@ -75,7 +91,7 @@ async function ingestDay(basDd: string): Promise<number> {
       .eq('bas_dd', toIsoDate(basDd))
     if (error) throw new Error(`cleanup ${basDd}: ${error.message}`)
   }
-  return rows.length
+  return { rows: rows.length, kisCheck }
 }
 
 // Stock count of the latest KRX day before `dayIso` (null when there is none, e.g. the first load)
@@ -103,7 +119,8 @@ async function finalDates(fromIso: string, toIso: string): Promise<Set<string>> 
   return new Set((data ?? []).map((d) => String(d.bas_dd).replace(/-/g, '')))
 }
 
-Deno.serve(async (req) => {
+// Every run is recorded in ingest_runs, and a failure alerts the operator on Telegram (../_shared/ops.ts)
+Deno.serve(monitored('krx-ingest', supabase, async (req) => {
   if (req.headers.get('x-ingest-secret') !== INGEST_SECRET) {
     return new Response('unauthorized', { status: 401 })
   }
@@ -133,9 +150,12 @@ Deno.serve(async (req) => {
   }
 
   const results: Record<string, number | string> = {}
+  const kisCheck: Record<string, KisCheck> = {} // per day: KIS's last snapshot vs. KRX's official closes
   for (const t of targets) {
     try {
-      results[t] = await ingestDay(t)
+      const r = await ingestDay(t)
+      results[t] = r.rows
+      if (r.kisCheck) kisCheck[t] = r.kisCheck
     } catch (e) {
       results[t] = `error: ${(e as Error).message}`
       if (String(e).includes('429')) break
@@ -144,5 +164,5 @@ Deno.serve(async (req) => {
   // Non-2xx when any day failed, so the failure shows up in the function logs and net._http_response
   // instead of hiding behind a 200 (a 401 from an expired KRX key went unnoticed for two weeks this way).
   const failed = Object.values(results).some((r) => typeof r === 'string')
-  return Response.json({ targets, results }, { status: failed ? 500 : 200 })
-})
+  return Response.json({ targets, results, kis_check: kisCheck }, { status: failed ? 500 : 200 })
+}))

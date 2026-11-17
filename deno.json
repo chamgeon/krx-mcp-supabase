@@ -2,7 +2,7 @@
   "lock": false,
   "tasks": {
     "test": "deno test --allow-env --allow-read=supabase supabase/functions",
-    "check": "deno check supabase/functions/kis-ingest/index.ts supabase/functions/krx-ingest/index.ts supabase/functions/mcp/index.ts supabase/functions/telegram-ingest/index.ts scripts/bench.ts scripts/fetch_fixtures.ts",
+    "check": "deno check supabase/functions/kis-ingest/index.ts supabase/functions/krx-ingest/index.ts supabase/functions/mcp/index.ts supabase/functions/pipeline-report/index.ts supabase/functions/telegram-ingest/index.ts scripts/bench.ts scripts/fetch_fixtures.ts",
     "test:db": "deno test --allow-env --allow-read=supabase --allow-net=127.0.0.1,localhost supabase/tests/db_test.ts",
     "test:mcp": "deno test --allow-env --allow-net=127.0.0.1,localhost supabase/tests/mcp_test.ts",
     "fixtures": "deno run --allow-read=supabase --allow-write=supabase/functions --allow-net=data-dbg.krx.co.kr,openapi.koreainvestment.com:9443,t.me scripts/fetch_fixtures.ts",

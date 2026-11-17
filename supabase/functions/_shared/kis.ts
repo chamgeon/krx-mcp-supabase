@@ -6,7 +6,7 @@ const KIS_BASE = 'https://openapi.koreainvestment.com:9443'
 const KIS_APP_KEY = Deno.env.get('KIS_APP_KEY')!
 const KIS_APP_SECRET = Deno.env.get('KIS_APP_SECRET')!
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 // Access tokens last 24h and KIS limits issuance (~1/min), so the token is cached in Postgres (shared by every
 // function) and, per function instance, in memory (saves the DB read on a warm instance).
@@ -72,7 +72,19 @@ export function isTokenRejected(e: unknown): boolean {
   return e instanceof KisError && (e.status === 401 || e.code === 'EGW00121' || e.code === 'EGW00123')
 }
 
-export async function kisGet(token: string, path: string, trId: string, params: Record<string, string>) {
+export type KisGetOptions = {
+  // Called with each rate-limit wait (a promise that resolves when the wait is over); the call waits on what it returns.
+  // Lets a caller record the waits (mcp: a `kis_rate_limited` step) without this module knowing about timings.
+  onRateLimited?: (wait: Promise<void>) => PromiseLike<void>
+}
+
+export async function kisGet(
+  token: string,
+  path: string,
+  trId: string,
+  params: Record<string, string>,
+  opts: KisGetOptions = {},
+) {
   const url = `${KIS_BASE}${path}?${new URLSearchParams(params)}`
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(url, {
@@ -87,9 +99,10 @@ export async function kisGet(token: string, path: string, trId: string, params: 
     })
     const body = await res.json().catch(() => null)
     if (res.ok && body?.rt_cd === '0') return body
-    // EGW00201 = 초당 거래건수 초과: back off and retry
+    // EGW00201 = 초당 거래건수 초과: back off and retry. The limit is per app key, shared with kis-ingest's bursts.
     if (body?.msg_cd === 'EGW00201' && attempt < 5) {
-      await sleep(1000)
+      const wait = sleep(1000)
+      await (opts.onRateLimited ? opts.onRateLimited(wait) : wait)
       continue
     }
     throw new KisError(

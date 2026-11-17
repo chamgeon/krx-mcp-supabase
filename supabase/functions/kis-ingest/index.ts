@@ -18,6 +18,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { kisGet, kisToken } from '../_shared/kis.ts'
 import { kisSnapshotProblems, parseKisRows, type Prev } from './parse.ts'
+import { monitored } from '../_shared/ops.ts'
 
 const MULTI_MAX = 30 // intstock-multprice: up to 30 stocks per call
 
@@ -100,7 +101,8 @@ async function snapshot(token: string, todayIso: string, asOf: string, prev: Pre
   return rows.length
 }
 
-Deno.serve(async (req) => {
+// Every run is recorded in ingest_runs, and a failure alerts the operator on Telegram (../_shared/ops.ts)
+Deno.serve(monitored('kis-ingest', supabase, async (req) => {
   if (req.headers.get('x-ingest-secret') !== INGEST_SECRET) {
     return new Response('unauthorized', { status: 401 })
   }
@@ -126,4 +128,4 @@ Deno.serve(async (req) => {
   } catch (e) {
     return Response.json({ date: today, error: (e as Error).message }, { status: 500 })
   }
-})
+}))

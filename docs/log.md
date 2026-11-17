@@ -412,8 +412,65 @@ What was done and why. Oldest first; new entries go at the bottom.
   rounds on 15 significant digits, halves away from zero, like Postgres `round(numeric)` (unit tests in
   `analyze_test.ts`). The tie and the halted stock already agreed.
 
+## 2026-11-17 — Latency so far (summary)
+- **Region forwarding was the big one** (11-16): tool calls run next to the database, so each query is ~40–75 ms
+  instead of ~700 ms. Real feed tool time 1,510 → 517 ms, movers 2,131 → 209 ms. Its follow-ups: answering the
+  handshake where it lands (saves 2–3 hops of ~140–860 ms per session start) and `forward_ms` in `tool_calls`.
+- **Fewer sequential queries helped a little:** a removed query saves a full trip (~40 ms: benchmark movers 119 → 79,
+  `check_available_dates` 116 → 77, screen 339 → 295; real movers 136 → 90); two queries side by side save only
+  ~20 ms (each slows ~15 ms). Off-session `analyze_stock` showed no gain.
+- **Largest remaining cost: cold calls**, parked by decision: a new worker costs ~0.8–1 s (start-up ~350 ms inside
+  `forward_ms`, ~300–550 ms per connection it opens). Claude's occasional calls mostly hit new workers: ~1.2–1.6 s on
+  the server side cold vs ~0.3–0.5 s warm.
+- **Query speed itself is mostly not the bottleneck:** most queries run in ~1.5–7 ms in Postgres, so 85–95% of a warm
+  query is the trip to the database API. Exceptions: `screen_stocks` (~250 ms of real SQL work; one real call 1,445 ms)
+  and the live KIS quote in in-session `analyze_stock` (130 ms–1.8 s, external).
+- Remaining levers, by size: cold calls (~0.8–1 s, parked) · the KIS quote (up to ~1.8 s, see below) ·
+  `screen_stocks` SQL (~0.25–1.4 s) · fewer trips (~40 ms each, e.g. one SQL function for day + main query) · faster
+  SQL elsewhere (a few ms). Claude generating its answer (seconds per turn) dwarfs all of them.
+
+## 2026-11-17 — KIS quote: record rate-limit waits
+- Kept: the live quote in in-session `analyze_stock` (the current price should be as fresh as possible; the snapshot
+  can be 5 minutes old). The token is cached; the time is the quote request itself.
+- **Done:** `kisGet` takes an `onRateLimited` callback, and the quote records each wait after KIS's per-second limit
+  (`EGW00201`, then a 1 s sleep and a retry) as a `kis_rate_limited` step inside `kis_quote`. No schema change
+  (`timings` is JSON). **Why:** the limit is per app key and `kis-ingest` sends ~93 requests in a burst every 5 minutes,
+  so the slow quotes (1.2–1.8 s) may be collisions with it; the timings couldn't tell.
+
+## 2026-11-18 — Ingest run record, failure alerts, daily report
+- **Done:** `ingest_runs`: every run of `krx-ingest`, `kis-ingest` and `telegram-ingest` records itself (job, time,
+  ok, HTTP status, its answer, the error), through one wrapper (`monitored()` in `_shared/ops.ts`). **Why:** pg_cron
+  only starts the HTTP request, so `cron.job_run_details` says "succeeded" even when a function refuses a batch, and
+  `net._http_response` keeps the answer only a few hours: a failure was visible to nobody (the 11-13 KRX key expiry
+  went two weeks unnoticed).
+- **Done:** a failed run sends an immediate Telegram message to the operator, at most one per job per hour
+  (`alerted`), so a broken key doesn't send one every 5 minutes.
+- **Done:** `pipeline-report`, daily at 18:00 KST (pg_cron), sends a Telegram report of the 24 hours before 18:00
+  (yesterday's 18:00 KIS run through today's runs; today's 18:00 run is in tomorrow's report): today's KIS snapshots
+  (and whether one came after the 15:40 close), the latest KRX day, Telegram polls and new posts, failing channels,
+  and failed runs per job. Weekends and holidays get a short "market closed" report. No message at 18:00 means the
+  report itself failed. It also deletes runs older than 90 days.
+- KRX check without a holiday calendar: `krx-ingest` deletes a day's `live_prices` rows once KRX's data is in, so a
+  provisional day before today still there at 18:00 is one KRX hasn't loaded; holidays never get KIS rows. A weekday
+  is a holiday when `kis-ingest` reported "not a trading day".
+- Secrets `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (README → Secrets); the cron job is in `sql/cron.example.sql`.
+- **Done:** KIS vs. KRX check. Before `krx-ingest` replaces a day's KIS rows with KRX's official data, it compares the
+  closes (`compareKisKrx`, answer field `kis_check`: compared, mismatches, stocks on one side only, examples), and the
+  report shows `✅ KIS vs KRX 11-16: all 2,771 closes match` or `⚠️ … N of M closes differ (examples)`. **Why:** the
+  KIS/KRX agreement was checked once on the 11-16 fixtures; this checks it every day. Closes only: after-hours trading
+  changes 거래량/거래대금 legitimately. Unverified: whether KIS's 18:00 snapshot close can differ from KRX's close
+  (after-hours single-price trading); the first reports will show.
+- Tests: unit tests for the error extraction, the report text and `compareKisKrx`; DB tests for `monitored()` on the
+  local stack (a run is recorded with its answer, a 401 isn't, a failure alerts once per hour and again after it,
+  a thrown error is a failed run, no secrets = recorded but not alerted; Telegram's API stubbed).
+- **Decided:** CI keeps skipping the real-data parser tests (fixtures are gitignored: KRX's terms and third-party
+  posts in a public repo). A parser only changes with its code, and those tests run locally then; a source changing
+  its format is caught by the ingest validation, which now alerts.
+
 ## Open
 - Telegram background backfill with a status column, cron resume, and a "still collecting" note in feed/search (8-page
   cap kept).
-- Alert on ingest failures (e.g. a Telegram message): refusals only show in function logs and `last_error` now.
 - Telegram tagging matches only 6-digit codes, so the 96 alphanumeric 종목코드 can be tagged by name only.
+- After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,
+  shorten the quote's backoff (one request needs little of the per-second budget), pace `kis-ingest`'s burst, or use
+  a separate KIS app key for quotes.
