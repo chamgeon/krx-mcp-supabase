@@ -64,8 +64,15 @@ export function normDate(d: string): string {
 }
 
 export const eok = (v: number | null | undefined) => (v == null ? null : Math.round(v / EOK))
-export const round = (v: number | null | undefined, d = 2) =>
-  v == null || !Number.isFinite(v) ? null : Math.round(v * 10 ** d) / 10 ** d
+// Rounds like Postgres round(numeric, d), so analyze_stock and screen_stocks agree to the last digit: on the decimal
+// digits (15 significant, which drops float noise: 1.005 is stored as 1.00499999…, and 1.005 * 100 = 100.4999…), and
+// halves away from zero (Math.round would send -1.005 to -1.00).
+export const round = (v: number | null | undefined, d = 2) => {
+  if (v == null || !Number.isFinite(v)) return null
+  const [mantissa, exp] = Math.abs(v).toExponential(14).split('e')
+  const scaled = Math.round(Number(`${mantissa}e${Number(exp) + d}`))
+  return Math.sign(v) * Number(`${scaled}e-${d}`) || 0 // || 0: no -0
+}
 export const pct = (a: number | null | undefined, b: number | null | undefined) =>
   a == null || !b ? null : round((a / b - 1) * 100)
 

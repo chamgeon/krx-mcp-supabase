@@ -390,12 +390,30 @@ What was done and why. Oldest first; new entries go at the bottom.
   `20261117000003` restores the 57 affected rows to `Claude-User`. The benchmark exclusion (`krx-bench/` prefix) was
   never affected.
 
+## 2026-11-17 — `supabase config push` under CLI v3; usage view dropped
+- Checked: `config push` is remote-only in CLI v3 (always the linked production project, with a confirmation prompt)
+  and writes every setting `config.toml` declares in api/auth/database/pooler/realtime/storage. `config diff` against
+  production today: 17 differences, all settings `config.toml` doesn't declare (auth URLs, Google login, the OAuth
+  server, pooler sizes), so a push would change nothing. Functions aren't in its scope at all: `verify_jwt = false`
+  comes from `[functions.*]` in `config.toml` at `functions deploy` (all four deployed functions show it).
+- **Done:** README setup no longer runs `config push` (it claimed to set `verify_jwt`); it says where `verify_jwt` comes
+  from, and to run `config diff` first if `config push` is ever used.
+- **Decided:** no `user_activity` view for now; usage is checked with plain SQL. Revisit if that gets tedious.
+
+## 2026-11-17 — Edge cases for `screen_stocks` vs. `analyze()`; rounding fix
+- **Decided:** no comparison on production data. Both sides are deterministic math on the same rows, already compared
+  on purpose-built seeded stocks; real data could only add edge cases, and a disagreement would be a slightly different
+  number between a screen and `analyze_stock`. The likely edge cases went into the seed instead.
+- **Done:** three seeded stocks (`supabase/seed.sql`), compared by the existing test like the others: 900010 반올림전자
+  (last-day 거래대금/거래량 exactly 1.005× the average: a rounding boundary), 900011 동률화학 (last close equal to the
+  prior 20/60/120-day high: a tie is not a breakout), 900012 휴업물산 (halted 5 days inside the windows, then trading).
+- Found and fixed: `analyze()` rounded 1.005 to 1.00 where `screen_stocks` gave 1.01. `round()` used
+  `Math.round(v * 100) / 100`, and 1.005 is stored as 1.00499999…; it also rounded negative halves toward zero. It now
+  rounds on 15 significant digits, halves away from zero, like Postgres `round(numeric)` (unit tests in
+  `analyze_test.ts`). The tie and the halted stock already agreed.
+
 ## Open
 - Telegram background backfill with a status column, cron resume, and a "still collecting" note in feed/search (8-page
   cap kept).
 - Alert on ingest failures (e.g. a Telegram message): refusals only show in function logs and `last_error` now.
-- Run the `screen_stocks` vs. `analyze()` comparison on a copy of production data (all ~2,800 stocks) to find
-  disagreements the seed can't show.
 - Telegram tagging matches only 6-digit codes, so the 96 alphanumeric 종목코드 can be tagged by name only.
-- Check what `supabase config push` targets under CLI v3 before the next run (README setup).
-- Optional: a `user_activity` view (signup, first/last call, calls per user) for checking usage without hand-written SQL.

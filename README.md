@@ -98,8 +98,11 @@ Create a free project at https://supabase.com (Seoul region recommended) and not
 supabase login
 supabase link --project-ref <PROJECT_REF>
 supabase db push --remote   # tables, indexes and the screen_stocks function (CLI v3: plain `db push` targets the local stack)
-supabase config push        # verify_jwt = false for both functions
 ```
+
+No `supabase config push` is needed: `verify_jwt = false` for the functions comes from `supabase/config.toml` when they
+are deployed (step 4). Note that under CLI v3 `config push` always targets the linked (production) project and writes
+every auth/database/storage setting `config.toml` declares; run `supabase config diff` first if you ever use it.
 
 ### 3. Secrets
 
@@ -124,6 +127,9 @@ supabase functions deploy krx-ingest
 supabase functions deploy telegram-ingest
 supabase functions deploy mcp
 ```
+
+Each deploy reads `[functions.<name>] verify_jwt = false` from `supabase/config.toml`: the ingest functions check their
+own secret and `mcp` handles login itself, so Supabase's own JWT check must stay off.
 
 ### 5. Load data
 

@@ -287,7 +287,7 @@ test('check_available_dates: range, a final day, a missing day', async () => {
   assertEquals(all.data_status, '장중 (intraday, provisional)')
 
   const hit = await call('check_available_dates', { date: DAY })
-  assertEquals([hit.available, hit.stocks, hit.data_status], [true, 9, '확정치 (KRX official)'])
+  assertEquals([hit.available, hit.stocks, hit.data_status], [true, 12, '확정치 (KRX official)'])
 
   const miss = await call('check_available_dates', { date: '2026-11-14' })
   assertEquals([miss.available, miss.previous_trading_day, miss.next_trading_day], [false, DAY, LIVE_DAY])

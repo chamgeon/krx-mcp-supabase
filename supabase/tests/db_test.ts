@@ -56,14 +56,16 @@ Deno.test({
   fn: async () => {
     const { data, error } = await db.from('daily_prices').select('isu_cd').eq('bas_dd', DAY)
     assert(!error, `can't reach the local DB (${error?.message}). Run: supabase start`)
-    assertEquals(data?.length, 9, 'seed not loaded or outdated. Run: supabase db reset')
+    assertEquals(data?.length, 12, 'seed not loaded or outdated. Run: supabase db reset')
   },
 })
 
 // ---- screen_stocks filters ------------------------------------------------------------------------
 
 Deno.test('default: every traded stock, the halted one excluded', async () => {
-  assertEquals(codes(await screen()), ['900001', '900002', '900003', '900005', '900006', '900007', '900008', '900009'])
+  assertEquals(codes(await screen()), [
+    '900001', '900002', '900003', '900005', '900006', '900007', '900008', '900009', '900010', '900011', '900012',
+  ])
 })
 
 Deno.test('include_untraded adds the halted stock, with no breakout', async () => {
@@ -76,7 +78,7 @@ Deno.test('include_untraded adds the halted stock, with no breakout', async () =
 })
 
 Deno.test('market filter', async () => {
-  assertEquals(codes(await screen({ p_market: 'KOSDAQ' })), ['900002', '900006', '900008'])
+  assertEquals(codes(await screen({ p_market: 'KOSDAQ' })), ['900002', '900006', '900008', '900011'])
 })
 
 Deno.test('fluc_rt and mktcap filters', async () => {
@@ -127,6 +129,15 @@ Deno.test('new listing: short history gives nulls, not errors', async () => {
   assertEquals(r.breakout_20, null)
   assertEquals(r.sideways_range_pct, null) // fewer days than the 20-day box
   assertEquals(r.trdval_ratio, 1) // average of the 9 prior days
+})
+
+Deno.test('edge cases: rounding boundary and a tie with the prior high', async () => {
+  const rows = await screen({ p_include_untraded: true })
+  const round = rows.find((r) => r.isu_cd === '900010')!
+  // 1.005 exactly: half up to 1.01 (floating point would give 1.0049999… and round down)
+  assertEquals([round.trdval_ratio, round.volume_ratio], [1.01, 1.01])
+  const tie = rows.find((r) => r.isu_cd === '900011')!
+  assertEquals([tie.high_20, tie.breakout_20], [10000, false]) // close = prior high: not a breakout
 })
 
 Deno.test('sort and limit', async () => {
@@ -191,7 +202,7 @@ Deno.test('prices view hides live rows for days KRX already published', async ()
 Deno.test('available_dates: final KRX day vs. provisional KIS day', async () => {
   const { data, error } = await db.from('available_dates').select('*').in('bas_dd', [DAY, LIVE_DAY]).order('bas_dd')
   if (error) throw new Error(error.message)
-  assertEquals(data!.map((d) => [d.bas_dd, d.row_count, d.final]), [[DAY, 9, true], [LIVE_DAY, 8, false]])
+  assertEquals(data!.map((d) => [d.bas_dd, d.row_count, d.final]), [[DAY, 12, true], [LIVE_DAY, 11, false]])
   assert(data![1].as_of, 'provisional day should have as_of')
 })
 

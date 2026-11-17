@@ -71,6 +71,22 @@ Deno.test('number helpers handle null, zero and NaN', () => {
   assertAlmostEquals(stddev([2, 4, 4, 4, 5, 5, 7, 9])!, 2.138, 1e-3) // sample stddev (n - 1)
 })
 
+Deno.test('round matches Postgres round(numeric): decimal digits, halves away from zero', () => {
+  // floats store these just below the half (1.005 = 1.00499999…), so naive * 100 rounding goes down
+  assertEquals(round(1.005), 1.01)
+  assertEquals(round(8_040_000_000 / 8_000_000_000), 1.01) // the seeded 900010 ratio
+  assertEquals(round(2.675), 2.68)
+  assertEquals(round(1.0049), 1)
+  // halves away from zero, also below it (Math.round(-100.5) is -100)
+  assertEquals(round(-1.005), -1.01)
+  assertEquals(round(-2.5, 0), -3)
+  assertEquals(round(-0.001), 0) // not -0
+  // very small and large values keep working
+  assertEquals(round(1e-7), 0)
+  assertEquals(round(123_456_789.125), 123_456_789.13)
+  assertEquals(round(0), 0)
+})
+
 // ---- analyze ------------------------------------------------------------------------------------
 
 Deno.test('short history (new listing): long-window metrics are null, never NaN', () => {

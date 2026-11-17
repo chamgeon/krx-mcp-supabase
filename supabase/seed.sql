@@ -1,6 +1,6 @@
 -- Local test data, loaded by `supabase start` / `supabase db reset` (never applied to production).
 --
--- 9 made-up stocks (codes 9000xx) over the weekdays 2026-05-01 .. 2026-11-13 (~140 trading days), each shaped to
+-- 12 made-up stocks (codes 9000xx) over the weekdays 2026-05-01 .. 2026-11-13 (~140 trading days), each shaped to
 -- trigger one screen_stocks / analyze_stock signal on the last day, 2026-11-13. k = trading days before that day
 -- (k = 0 is 2026-11-13). Tests in supabase/tests/ rely on these shapes; change both together.
 --
@@ -13,6 +13,10 @@
 --   900007 변동금속    KOSPI   alternates 10,000 / 10,500                      → ~5% daily volatility
 --   900008 급등테크    KOSDAQ  flat 1,000, then 1,300 on the last day          → +30%: get_daily_movers sheet1
 --   900009 대형강세    KOSPI   flat 50,000, then 54,000; 거래대금 600억 daily  → +8% and ≥ 500억: sheet2
+--   Edge cases for screen_stocks vs. analyze() (no signal of their own):
+--   900010 반올림전자  KOSPI   거래대금/거래량 exactly 1.005× the prior average → rounding boundary (1.01, half up)
+--   900011 동률화학    KOSDAQ  last close = the prior 20/60/120-day high        → a tie is not a breakout
+--   900012 휴업물산    KOSPI   halted 5 days (k = 1..5), trading again on the last day → zero days inside the windows
 --
 -- Plus a provisional KIS day (live_prices, 2026-11-16 mid-session) and one stale live_prices row for 2026-11-13 that
 -- the prices view must hide because KRX already has that day.
@@ -34,7 +38,10 @@ raw as (
     ('900006', '신규상장',   'KOSDAQ',  100000000000),
     ('900007', '변동금속',   'KOSPI',   100000000000),
     ('900008', '급등테크',   'KOSDAQ',  100000000000),
-    ('900009', '대형강세',   'KOSPI',   100000000000)
+    ('900009', '대형강세',   'KOSPI',   100000000000),
+    ('900010', '반올림전자', 'KOSPI',   100000000000),
+    ('900011', '동률화학',   'KOSDAQ',  100000000000),
+    ('900012', '휴업물산',   'KOSPI',   100000000000)
   ) as s(isu_cd, isu_nm, market, mktcap)
   -- per stock and day: {close, high, low, volume, trdval}; null = not listed yet
   cross join lateral (select case
@@ -58,6 +65,14 @@ raw as (
          case when d.k = 0 then array[1300, 1320, 1250, 1000000, 10000000000] else array[1000, 1010, 990, 1000000, 10000000000] end
        when s.isu_cd = '900009' then
          case when d.k = 0 then array[54000, 54500, 53000, 1000000, 60000000000] else array[50000, 50500, 49500, 1000000, 60000000000] end
+       when s.isu_cd = '900010' then
+         case when d.k = 0 then array[4000, 4040, 3960, 2010000, 8040000000] else array[4000, 4040, 3960, 2000000, 8000000000] end
+       when s.isu_cd = '900011' then
+         case when d.k = 0 then array[10000, 10000, 9900, 1000000, 10000000000] else array[9900, 10000, 9800, 1000000, 10000000000] end
+       when s.isu_cd = '900012' then
+         case when d.k = 0 then array[6050, 6060, 6000, 1000000, 6000000000]
+              when d.k <= 5 then array[6000, 0, 0, 0, 0] -- halted: high/low/거래량/거래대금 0, close carried
+              else array[6000, 6060, 5940, 1000000, 6000000000] end
      end::bigint[] as a
   ) x
   cross join lateral (select x.a[1] as close, x.a[2] as high, x.a[3] as low, x.a[4] as volume, x.a[5] as trdval) v
