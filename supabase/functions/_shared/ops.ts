@@ -66,13 +66,18 @@ export function kstTime(d: Date): string {
 }
 
 type Handler = (req: Request) => Promise<Response>
+type MonitorOptions = {
+  // Whether a failed run sends the hourly-throttled alert (default: always). telegram-ingest alerts about channel
+  // changes itself and uses this only for failures of the whole run.
+  alertOn?: (body: unknown) => boolean
+}
 
 /**
  * Wraps an ingest function's handler: records the run in ingest_runs and alerts on failure. A 401 (a request without
  * the ingest secret) isn't a run and isn't recorded. Recording never changes the answer, and a recording failure is
  * only logged.
  */
-export function monitored(job: string, supabase: SupabaseClient, handler: Handler): Handler {
+export function monitored(job: string, supabase: SupabaseClient, handler: Handler, opts: MonitorOptions = {}): Handler {
   return async (req) => {
     const startedAt = new Date()
     const t0 = performance.now()
@@ -84,7 +89,7 @@ export function monitored(job: string, supabase: SupabaseClient, handler: Handle
     }
     if (res.status === 401) return res
     try {
-      await record(supabase, job, startedAt, Math.round(performance.now() - t0), res)
+      await record(supabase, job, startedAt, Math.round(performance.now() - t0), res, opts)
     } catch (e) {
       console.error('ingest_runs: could not record the run:', (e as Error).message)
     }
@@ -92,11 +97,18 @@ export function monitored(job: string, supabase: SupabaseClient, handler: Handle
   }
 }
 
-async function record(supabase: SupabaseClient, job: string, startedAt: Date, ms: number, res: Response) {
+async function record(
+  supabase: SupabaseClient,
+  job: string,
+  startedAt: Date,
+  ms: number,
+  res: Response,
+  opts: MonitorOptions,
+) {
   const body = await res.clone().json().catch(() => null)
   const error = res.ok ? null : (errorOf(body) ?? `HTTP ${res.status}`)
   let alerted = false
-  if (!res.ok) {
+  if (!res.ok && (opts.alertOn?.(body) ?? true)) {
     const { data } = await supabase.from('ingest_runs').select('id').eq('job', job).eq('alerted', true)
       .gte('started_at', new Date(Date.now() - ALERT_EVERY_MS).toISOString()).limit(1)
     if (!data?.length) {

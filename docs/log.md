@@ -428,6 +428,9 @@ What was done and why. Oldest first; new entries go at the bottom.
 - Remaining levers, by size: cold calls (~0.8–1 s, parked) · the KIS quote (up to ~1.8 s, see below) ·
   `screen_stocks` SQL (~0.25–1.4 s) · fewer trips (~40 ms each, e.g. one SQL function for day + main query) · faster
   SQL elsewhere (a few ms). Claude generating its answer (seconds per turn) dwarfs all of them.
+- The benchmark runs behind these numbers (`bench-results/`, gitignored: keep a copy):
+  `20261116T065433Z-before-forwarding`, `20261116T075114Z-after-forwarding`, `20261117T011225Z-before-parallel`,
+  `20261117T014213Z-after-parallel`. Both pairs are from Seoul, without `--region` (it didn't exist yet).
 
 ## 2026-11-17 — KIS quote: record rate-limit waits
 - Kept: the live quote in in-session `analyze_stock` (the current price should be as fresh as possible; the snapshot
@@ -463,6 +466,10 @@ What was done and why. Oldest first; new entries go at the bottom.
 - Tests: unit tests for the error extraction, the report text and `compareKisKrx`; DB tests for `monitored()` on the
   local stack (a run is recorded with its answer, a 401 isn't, a failure alerts once per hour and again after it,
   a thrown error is a failed run, no secrets = recorded but not alerted; Telegram's API stubbed).
+- **Done:** Telegram channel alerts only on change: a channel that starts failing (healthy before this run) or works
+  again (`telegram-ingest/alerts.ts`). **Why:** failing channels are retried hourly and each retry fails the run, so a
+  permanently broken channel would have alerted every hour; it now alerts once, and the 18:00 report keeps listing it.
+  A failure of the whole run (no per-channel results) still gets the hourly-throttled alert (`monitored`'s `alertOn`).
 - **Decided:** CI keeps skipping the real-data parser tests (fixtures are gitignored: KRX's terms and third-party
   posts in a public repo). A parser only changes with its code, and those tests run locally then; a source changing
   its format is caught by the ingest validation, which now alerts.

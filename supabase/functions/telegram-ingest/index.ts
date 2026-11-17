@@ -13,7 +13,8 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { loadStockIndex, stockIndex, syncChannel, tagStocks, type SyncResult } from '../_shared/telegram.ts'
-import { monitored } from '../_shared/ops.ts'
+import { monitored, sendTelegram } from '../_shared/ops.ts'
+import { channelAlerts } from './alerts.ts'
 
 const INGEST_SECRET = Deno.env.get('INGEST_SECRET')!
 const supabase = createClient(
@@ -49,7 +50,10 @@ async function retag() {
 const CHANNEL_PAUSE_MS = 300
 const FAILING_RETRY_MS = 3600_000
 
-// Every run is recorded in ingest_runs, and a failure alerts the operator on Telegram (../_shared/ops.ts)
+// Every run is recorded in ingest_runs (../_shared/ops.ts). Channel failures alert only when a channel starts failing or
+// works again (./alerts.ts); a failure of the whole run (no per-channel results) gets the usual hourly alert.
+const wholeRunFailed = (body: unknown) => !Array.isArray((body as { results?: unknown } | null)?.results)
+
 Deno.serve(monitored('telegram-ingest', supabase, async (req) => {
   if (req.headers.get('x-ingest-secret') !== INGEST_SECRET) {
     return new Response('unauthorized', { status: 401 })
@@ -75,9 +79,12 @@ Deno.serve(monitored('telegram-ingest', supabase, async (req) => {
     results.push(await syncChannel(supabase, c.username, () => stockIndex(supabase)))
   }
 
+  const alert = channelAlerts(new Map(due.map((c) => [c.username, c.poll_errors])), results)
+  if (alert) await sendTelegram(alert)
+
   const failed = results.filter((r) => !r.ok)
   return Response.json(
     { polled: results.length, skipped: (channels?.length ?? 0) - due.length, new_posts: results.reduce((n, r) => n + r.new_posts, 0), results },
     { status: failed.length ? 500 : 200 },
   )
-}))
+}, { alertOn: wholeRunFailed }))

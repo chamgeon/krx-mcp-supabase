@@ -410,3 +410,27 @@ Deno.test('monitored: without the Telegram secrets the failure is still recorded
     await db.from('ingest_runs').delete().eq('job', job)
   }
 })
+
+Deno.test('monitored: alertOn skips the hourly alert for some failures (telegram-ingest: per-channel ones)', async () => {
+  const job = `test-${crypto.randomUUID()}`
+  const wholeRunFailed = (body: unknown) => !Array.isArray((body as { results?: unknown } | null)?.results)
+  try {
+    const channelFailed = monitored(job, db, () =>
+      Promise.resolve(Response.json({ polled: 1, results: [{ channel: 'c', ok: false, error: 'x' }] }, { status: 500 })), {
+      alertOn: wholeRunFailed,
+    })
+    const runFailed = monitored(job, db, () => Promise.resolve(Response.json({ error: 'db down' }, { status: 500 })), {
+      alertOn: wholeRunFailed,
+    })
+    const { alerts } = await withTelegramStub(async () => {
+      await channelFailed(new Request('http://x'))
+      await runFailed(new Request('http://x'))
+    })
+    const runs = await runsOf(job)
+    assertEquals(runs.map((r) => [r.ok, r.error, r.alerted]), [[false, 'c: x', false], [false, 'db down', true]])
+    assertEquals(alerts.length, 1)
+    assert(alerts[0].includes('db down'), alerts[0])
+  } finally {
+    await db.from('ingest_runs').delete().eq('job', job)
+  }
+})
