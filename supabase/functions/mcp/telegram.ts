@@ -5,7 +5,7 @@ import type { McpServer } from 'npm:@modelcontextprotocol/server@^2.0.0'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { z } from 'npm:zod@^4.3.6'
 import { channelName, fetchPage, stockIndex, syncChannel } from '../_shared/telegram.ts'
-import { step } from './timing.ts'
+import { early, step } from './timing.ts'
 
 const MAX_CHANNELS = 50 // cap on shared collection, so open adding can't turn the server into a crawler
 const BACKFILL_DAYS = 30
@@ -35,12 +35,6 @@ async function latestTradingDay(supabase: SupabaseClient): Promise<string | null
   return latestDay.day
 }
 
-// For a query started before it's needed, so it runs alongside others: an early return can leave it un-awaited, and
-// this keeps its failure from becoming an unhandled rejection. Awaiting it still throws.
-function early<T>(p: Promise<T>): Promise<T> {
-  p.catch(() => {})
-  return p
-}
 
 function json(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 1) }] }

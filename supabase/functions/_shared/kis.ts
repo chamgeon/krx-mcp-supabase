@@ -8,11 +8,41 @@ const KIS_APP_SECRET = Deno.env.get('KIS_APP_SECRET')!
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-// Access tokens last 24h and KIS limits issuance (~1/min), so the token is cached in Postgres.
-export async function kisToken(supabase: SupabaseClient): Promise<string> {
-  const { data, error } = await supabase.from('kis_token').select('*').eq('id', 1).maybeSingle()
+// Access tokens last 24h and KIS limits issuance (~1/min), so the token is cached in Postgres (shared by every
+// function) and, per function instance, in memory (saves the DB read on a warm instance).
+export type StoredToken = { access_token: string; expires_at: string }
+
+const MIN_LEFT_MS = 10 * 60_000 // a token this close to expiry is treated as expired
+let memo: StoredToken | null = null
+
+export function isUsable(t: StoredToken | null | undefined): t is StoredToken {
+  return !!t && new Date(t.expires_at).getTime() - Date.now() > MIN_LEFT_MS
+}
+
+/**
+ * The cached token, from memory or else Postgres; null if there is none or it's about to expire. Never calls KIS, so
+ * it is safe to start before knowing whether a quote is needed.
+ */
+export async function storedKisToken(supabase: SupabaseClient): Promise<StoredToken | null> {
+  if (isUsable(memo)) return memo
+  const { data, error } = await supabase.from('kis_token').select('access_token, expires_at').eq('id', 1).maybeSingle()
   if (error) throw new Error(`kis_token: ${error.message}`)
-  if (data && new Date(data.expires_at).getTime() - Date.now() > 10 * 60_000) return data.access_token
+  if (!isUsable(data)) return null
+  memo = data
+  return data
+}
+
+/** Drops the in-memory token, e.g. after KIS rejected it, so the next lookup reads Postgres again. */
+export function forgetKisToken() {
+  memo = null
+}
+
+/**
+ * A usable token: `stored` (a storedKisToken() result started earlier) or a fresh lookup, else a newly issued one.
+ */
+export async function kisToken(supabase: SupabaseClient, stored?: Promise<StoredToken | null>): Promise<string> {
+  const s = await (stored ?? storedKisToken(supabase))
+  if (isUsable(s)) return s.access_token
 
   const res = await fetch(`${KIS_BASE}/oauth2/tokenP`, {
     method: 'POST',
@@ -26,7 +56,20 @@ export async function kisToken(supabase: SupabaseClient): Promise<string> {
     .from('kis_token')
     .upsert({ id: 1, access_token: j.access_token, expires_at })
   if (upErr) throw new Error(`kis_token: ${upErr.message}`)
+  memo = { access_token: j.access_token, expires_at }
   return j.access_token
+}
+
+/** A failed KIS call, with KIS's message code (msg_cd) so callers can tell a rejected token from other errors. */
+export class KisError extends Error {
+  constructor(message: string, readonly status: number, readonly code: string | null) {
+    super(message)
+  }
+}
+
+// KIS answers a bad token with EGW00121 (invalid) or EGW00123 (expired), or a plain 401
+export function isTokenRejected(e: unknown): boolean {
+  return e instanceof KisError && (e.status === 401 || e.code === 'EGW00121' || e.code === 'EGW00123')
 }
 
 export async function kisGet(token: string, path: string, trId: string, params: Record<string, string>) {
@@ -49,7 +92,11 @@ export async function kisGet(token: string, path: string, trId: string, params: 
       await sleep(1000)
       continue
     }
-    throw new Error(`KIS ${trId}: HTTP ${res.status} ${body?.msg_cd ?? ''} ${body?.msg1 ?? ''}`.trim())
+    throw new KisError(
+      `KIS ${trId}: HTTP ${res.status} ${body?.msg_cd ?? ''} ${body?.msg1 ?? ''}`.trim(),
+      res.status,
+      body?.msg_cd ?? null,
+    )
   }
 }
 

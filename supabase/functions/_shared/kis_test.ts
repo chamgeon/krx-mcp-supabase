@@ -1,8 +1,18 @@
 // Unit tests for KIS response parsing and the session clock.
 // Run from the repo root: deno task test
 
-import { assertEquals } from 'jsr:@std/assert@1'
-import { num, sessionElapsed } from './kis.ts'
+import { assert, assertEquals } from 'jsr:@std/assert@1'
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
+import {
+  forgetKisToken,
+  isTokenRejected,
+  KisError,
+  kisToken,
+  num,
+  sessionElapsed,
+  storedKisToken,
+  type StoredToken,
+} from './kis.ts'
 
 Deno.test('num parses KIS number strings', () => {
   assertEquals(num('1,234'), 1234)
@@ -22,4 +32,72 @@ Deno.test('sessionElapsed over the 09:00–15:30 KST session', () => {
   assertEquals(sessionElapsed(new Date('2026-11-13T03:15:00Z')), 0.5) // 12:15, halfway
   assertEquals(sessionElapsed(new Date('2026-11-13T06:30:00Z')), 1) // 15:30 close
   assertEquals(sessionElapsed(new Date('2026-11-13T10:00:00Z')), 1) // 19:00 KST, after close
+})
+
+// ---- Token cache: memory, then Postgres, then KIS ----
+
+const inHours = (h: number) => new Date(Date.now() + h * 3600_000).toISOString()
+
+/** A stand-in for the kis_token table: counts reads and records upserts. */
+function fakeDb(row: StoredToken | null) {
+  const db = { reads: 0, upserts: [] as unknown[], row }
+  const client = {
+    from: () => ({
+      select: () => ({ eq: () => ({ maybeSingle: () => (db.reads++, Promise.resolve({ data: db.row, error: null })) }) }),
+      upsert: (r: unknown) => (db.upserts.push(r), Promise.resolve({ error: null })),
+    }),
+  } as unknown as SupabaseClient
+  return { db, client }
+}
+
+Deno.test('storedKisToken: Postgres once, then memory', async () => {
+  forgetKisToken()
+  const { db, client } = fakeDb({ access_token: 'db-token', expires_at: inHours(5) })
+  assertEquals((await storedKisToken(client))?.access_token, 'db-token')
+  assertEquals((await storedKisToken(client))?.access_token, 'db-token')
+  assertEquals(db.reads, 1)
+  forgetKisToken() // e.g. after KIS rejected it: the next lookup reads Postgres again
+  db.row = { access_token: 'replaced', expires_at: inHours(5) }
+  assertEquals((await storedKisToken(client))?.access_token, 'replaced')
+  assertEquals(db.reads, 2)
+})
+
+Deno.test('storedKisToken never returns a token about to expire, and never calls KIS', async () => {
+  forgetKisToken()
+  const realFetch = globalThis.fetch
+  globalThis.fetch = () => Promise.reject(new Error('KIS must not be called'))
+  try {
+    const { client } = fakeDb({ access_token: 'old', expires_at: inHours(0.1) }) // 6 minutes left
+    assertEquals(await storedKisToken(client), null)
+    assertEquals(await storedKisToken(fakeDb(null).client), null)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+Deno.test('kisToken issues only without a usable stored token, and remembers the new one', async () => {
+  forgetKisToken()
+  const realFetch = globalThis.fetch
+  let issued = 0
+  globalThis.fetch = () => (issued++, Promise.resolve(Response.json({ access_token: 'new-token', expires_in: 86400 })))
+  try {
+    const { db, client } = fakeDb({ access_token: 'old', expires_at: inHours(0.1) })
+    // an early lookup's result is used instead of a second read
+    assertEquals(await kisToken(client, storedKisToken(client)), 'new-token')
+    assertEquals([issued, db.reads, db.upserts.length], [1, 1, 1])
+    // now in memory: no read, no issue
+    assertEquals(await kisToken(client), 'new-token')
+    assertEquals([issued, db.reads], [1, 1])
+  } finally {
+    globalThis.fetch = realFetch
+    forgetKisToken()
+  }
+})
+
+Deno.test('isTokenRejected: only KIS token errors', () => {
+  assert(isTokenRejected(new KisError('x', 500, 'EGW00123')))
+  assert(isTokenRejected(new KisError('x', 500, 'EGW00121')))
+  assert(isTokenRejected(new KisError('x', 401, null)))
+  assert(!isTokenRejected(new KisError('x', 500, 'EGW00201'))) // rate limit
+  assert(!isTokenRejected(new Error('network')))
 })

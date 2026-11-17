@@ -24,6 +24,15 @@ export async function timeCall<T>(
   }
 }
 
+/**
+ * For work started before it's needed, so it runs alongside other queries: an early return can leave it un-awaited,
+ * and this keeps its failure from becoming an unhandled rejection. Awaiting the returned promise still throws.
+ */
+export function early<T>(p: Promise<T>): Promise<T> {
+  p.catch(() => {})
+  return p
+}
+
 /** Awaits `work` and, inside a timed call, records how long it took. Accepts supabase-js query builders (thenables). */
 export async function step<T>(name: string, work: PromiseLike<T>): Promise<T> {
   const timer = current.getStore()

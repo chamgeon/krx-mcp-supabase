@@ -2,7 +2,18 @@
 // Run from the repo root: deno task test
 
 import { assertEquals } from 'jsr:@std/assert@1'
-import { FORWARDED_HEADER, forwardHeaders, forwardUrl, responseHeaders, shouldForward } from './forward.ts'
+import {
+  arrivalHeaders,
+  hopFrom,
+  FORWARD_MS_HEADER,
+  FORWARDED_HEADER,
+  forwardHeaders,
+  forwardUrl,
+  LANDED_AT_HEADER,
+  LANDED_IN_HEADER,
+  responseHeaders,
+  shouldForward,
+} from './forward.ts'
 
 const none = new Headers()
 const forwarded = new Headers({ [FORWARDED_HEADER]: '1' })
@@ -27,6 +38,8 @@ Deno.test('request headers: caller headers kept, pin and marker added, host drop
   const h = forwardHeaders(
     new Headers({ authorization: 'Bearer t', 'user-agent': 'Claude-User', host: 'x', 'mcp-protocol-version': '2025-06-18', 'content-length': '10' }),
     'ap-south-1',
+    'us-east-1',
+    1_000_000,
   )
   assertEquals(h.get('authorization'), 'Bearer t')
   assertEquals(h.get('user-agent'), 'Claude-User') // usage logging still sees the real client
@@ -34,6 +47,7 @@ Deno.test('request headers: caller headers kept, pin and marker added, host drop
   assertEquals(h.get('x-region'), 'ap-south-1')
   assertEquals(h.get(FORWARDED_HEADER), '1')
   assertEquals([h.has('host'), h.has('content-length')], [false, false])
+  assertEquals([h.get(LANDED_AT_HEADER), h.get(LANDED_IN_HEADER)], ['1000000', 'us-east-1'])
 })
 
 Deno.test('response headers: decoded-body headers dropped, region noted', () => {
@@ -45,4 +59,45 @@ Deno.test('response headers: decoded-body headers dropped, region noted', () => 
   assertEquals(h.get('www-authenticate'), 'Bearer x') // 401s still point clients to the login metadata
   assertEquals([h.has('content-encoding'), h.has('content-length')], [false, false])
   assertEquals(h.get('x-mcp-handled-in'), 'ap-south-1')
+})
+
+// ---- Hop timing: forwardHeaders stamps, arrivalHeaders measures ----
+
+Deno.test('arrival: a forwarded request gets forward_ms and keeps where it landed', () => {
+  const sent = forwardHeaders(new Headers(), 'ap-south-1', 'us-east-1', 1_000_000)
+  const h = arrivalHeaders(sent, 1_000_180)
+  assertEquals([h.get(FORWARD_MS_HEADER), h.get(LANDED_IN_HEADER)], ['180', 'us-east-1'])
+  // a small negative value is clock skew between the hosts: kept, so it shows in the log
+  assertEquals(arrivalHeaders(sent, 999_995).get(FORWARD_MS_HEADER), '-5')
+})
+
+Deno.test('arrival: caller-sent hop headers never reach the log', () => {
+  // not forwarded: everything a caller sent is dropped
+  const direct = arrivalHeaders(
+    new Headers({ [FORWARD_MS_HEADER]: '1', [LANDED_AT_HEADER]: '999000', [LANDED_IN_HEADER]: 'fake' }),
+    1_000_000,
+  )
+  assertEquals([direct.has(FORWARD_MS_HEADER), direct.has(LANDED_AT_HEADER), direct.has(LANDED_IN_HEADER)], [false, false, false])
+  // forwarded: a sent forward_ms is replaced by the measured one
+  const forwarded = arrivalHeaders(new Headers({ [FORWARDED_HEADER]: '1', [LANDED_AT_HEADER]: '999900', [FORWARD_MS_HEADER]: '1' }), 1_000_000)
+  assertEquals(forwarded.get(FORWARD_MS_HEADER), '100')
+})
+
+Deno.test('arrival: a missing or implausible stamp gives no forward_ms', () => {
+  const at = (stamp: string | null) => {
+    const h = new Headers({ [FORWARDED_HEADER]: '1', [LANDED_IN_HEADER]: 'us-east-1' })
+    if (stamp !== null) h.set(LANDED_AT_HEADER, stamp)
+    return arrivalHeaders(h, 1_000_000)
+  }
+  for (const stamp of [null, '', 'abc', '1', String(1_000_000 + 61_000)]) {
+    const h = at(stamp)
+    assertEquals([h.has(FORWARD_MS_HEADER), h.has(LANDED_IN_HEADER)], [false, false], `stamp ${stamp}`)
+  }
+})
+
+Deno.test('hopFrom: what reaches the log', () => {
+  const sent = forwardHeaders(new Headers(), 'ap-south-1', 'us-east-1', 1_000_000)
+  assertEquals(hopFrom(arrivalHeaders(sent, 1_000_120)), { landedIn: 'us-east-1', forwardMs: 120 })
+  assertEquals(hopFrom(arrivalHeaders(new Headers({ [FORWARD_MS_HEADER]: '5' }), 1_000_000)), { landedIn: null, forwardMs: null })
+  assertEquals(hopFrom(undefined), { landedIn: null, forwardMs: null })
 })

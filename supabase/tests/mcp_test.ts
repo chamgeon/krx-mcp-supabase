@@ -36,9 +36,13 @@ function test(name: string, fn: () => Promise<void>) {
   Deno.test({ name, fn, sanitizeResources: false, sanitizeOps: false })
 }
 
-async function connect(auth: { key: string } | { token: string }, userAgent?: string): Promise<Client> {
+async function connect(
+  auth: { key: string } | { token: string },
+  userAgent?: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<Client> {
   const url = new URL(MCP)
-  const headers: Record<string, string> = userAgent ? { 'User-Agent': userAgent } : {}
+  const headers: Record<string, string> = { ...extraHeaders, ...(userAgent ? { 'User-Agent': userAgent } : {}) }
   if ('key' in auth) url.searchParams.set('key', auth.key)
   else headers.Authorization = `Bearer ${auth.token}`
   const client = new Client({ name: 'krx-mcp-tests', version: '1.0.0' })
@@ -472,6 +476,38 @@ test('fewer sequential queries: movers, screen, analyze, search', async () => {
   } finally {
     await bench.close()
   }
+})
+
+// Region forwarding can't run locally (DB_REGION unset), so this sends what a landing copy would add
+test('forwarded calls log the hop (landed_in, forward_ms); direct calls log none', async () => {
+  const marker = `hop-${crypto.randomUUID()}`
+  // The stamp is fixed when the client is created, so the measured hop includes the MCP handshake: only bounds checked
+  const hop = await connect({ key: KEY }, undefined, {
+    'x-mcp-forwarded': '1',
+    'x-mcp-landed-at': String(Date.now() - 150),
+    'x-mcp-landed-in': 'test-landing-region',
+    'x-mcp-forward-ms': '1', // a caller's own value must be ignored
+  })
+  try {
+    await call('find_stock', { name: marker }, hop)
+  } finally {
+    await hop.close()
+  }
+  const row = await waitForLog((q) => q.eq('tool', 'find_stock').eq('args->>name', marker))
+  assertEquals(row.landed_in, 'test-landing-region')
+  assert(row.forward_ms >= 150 && row.forward_ms < 30_000, `forward_ms ${row.forward_ms}`)
+  assertEquals(row.handled_in, null) // SB_REGION is unset locally
+
+  // A direct call can't put values in the log
+  const direct = `hop-${crypto.randomUUID()}`
+  const spoof = await connect({ key: KEY }, undefined, { 'x-mcp-forward-ms': '5', 'x-mcp-landed-in': 'fake' })
+  try {
+    await call('find_stock', { name: direct }, spoof)
+  } finally {
+    await spoof.close()
+  }
+  const d = await waitForLog((q) => q.eq('tool', 'find_stock').eq('args->>name', direct))
+  assertEquals([d.landed_in, d.forward_ms], [null, null])
 })
 
 // Close the shared client last so its stream doesn't outlive the tests

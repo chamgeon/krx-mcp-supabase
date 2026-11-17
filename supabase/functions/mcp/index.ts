@@ -12,10 +12,28 @@ import { createMcpHandler, McpServer } from 'npm:@modelcontextprotocol/server@^2
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { z } from 'npm:zod@^4.3.6'
 import { createRemoteJWKSet, jwtVerify } from 'npm:jose@^5.9.6'
-import { kisGet, kisToken, num, sessionElapsed } from '../_shared/kis.ts'
+import {
+  forgetKisToken,
+  isTokenRejected,
+  isUsable,
+  kisGet,
+  kisToken,
+  num,
+  sessionElapsed,
+  storedKisToken,
+  type StoredToken,
+} from '../_shared/kis.ts'
 import { registerTelegramTools } from './telegram.ts'
-import { type Step, step, timeCall } from './timing.ts'
-import { forwardHeaders, forwardUrl, responseHeaders, shouldForward } from './forward.ts'
+import { early, type Step, step, timeCall } from './timing.ts'
+import {
+  arrivalHeaders,
+  forwardHeaders,
+  forwardUrl,
+  type Hop,
+  hopFrom,
+  responseHeaders,
+  shouldForward,
+} from './forward.ts'
 import {
   analyze,
   charts,
@@ -101,13 +119,29 @@ function dataStatus(d: Pick<DayRow, 'final' | 'as_of'> | null | undefined) {
   }
 }
 
-// Live quote for one stock (KIS 주식현재가 시세), used by analyze_stock while the market is open
-async function liveQuote(code: string) {
-  const token = await step('kis_token', kisToken(supabase))
-  const { output: o } = await step('kis_quote', kisGet(token, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
-    FID_COND_MRKT_DIV_CODE: 'J',
-    FID_INPUT_ISCD: code,
-  }))
+// Live quote for one stock (KIS 주식현재가 시세), used by analyze_stock while the market is open. `stored` is the
+// token lookup (memory or Postgres) the caller started early; a new token is issued only if it found none.
+async function liveQuote(code: string, stored: Promise<StoredToken | null>) {
+  const fetchQuote = (token: string) =>
+    step('kis_quote', kisGet(token, '/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', {
+      FID_COND_MRKT_DIV_CODE: 'J',
+      FID_INPUT_ISCD: code,
+    }))
+  const s = await stored
+  const token = isUsable(s) ? s.access_token : await step('kis_token_issue', kisToken(supabase, stored))
+  let body
+  try {
+    body = await fetchQuote(token)
+  } catch (e) {
+    // The in-memory token can be stale if another function replaced it: re-read Postgres once, and retry only with a
+    // different token (never issue here, which KIS rate-limits)
+    if (!isTokenRejected(e)) throw e
+    forgetKisToken()
+    const fresh = await step('kis_token_retry', storedKisToken(supabase))
+    if (!fresh || fresh.access_token === token) throw e
+    body = await fetchQuote(fresh.access_token)
+  }
+  const o = body.output
   return {
     as_of: kstTime(new Date().toISOString()),
     price: num(o.stck_prpr),
@@ -129,7 +163,16 @@ function json(data: unknown) {
 
 // Usage logging: every tool call becomes one row in public.tool_calls. The insert runs after the response
 // (EdgeRuntime.waitUntil), so logging never slows a tool down, and a failed insert never breaks one.
-type Caller = { userId: string | null; auth: 'oauth' | 'shared_key'; client: string | null }
+// hop: where the request landed and the forward time, when it was forwarded here (forward.ts)
+type Caller = {
+  userId: string | null
+  auth: 'oauth' | 'shared_key'
+  client: string | null
+  hop: Hop
+}
+
+// The region this copy runs in (set by Supabase; unset locally)
+const HERE_REGION = Deno.env.get('SB_REGION') || null
 
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined
 
@@ -159,6 +202,9 @@ function logCall(
     latency_ms: Math.round(performance.now() - started),
     response_bytes: r?.content ? r.content.reduce((n, c) => n + (c.text?.length ?? 0), 0) : null,
     timings: steps.length ? steps : null,
+    landed_in: caller.hop.landedIn,
+    forward_ms: caller.hop.forwardMs,
+    handled_in: HERE_REGION,
   }
   const p = supabase.from('tool_calls').insert(row).then(({ error }) => {
     if (error) console.error('tool_calls insert failed:', error.message)
@@ -193,7 +239,15 @@ function withLogging(server: McpServer, caller: Caller): McpServer {
       }
       if (bench) {
         const r = run.result as { _meta?: Record<string, unknown> }
-        return { ...r, _meta: { ...r._meta, latency_ms: Math.round(performance.now() - started), timings: run.steps } }
+        return {
+          ...r,
+          _meta: {
+            ...r._meta,
+            latency_ms: Math.round(performance.now() - started),
+            timings: run.steps,
+            hop: { ...caller.hop, handledIn: HERE_REGION },
+          },
+        }
       }
       logCall(caller, name, args, started, run.steps, run.result)
       return run.result
@@ -206,6 +260,8 @@ const handler = createMcpHandler((ctx) => {
     userId: (ctx.authInfo?.extra?.userId as string | undefined) ?? null,
     auth: ctx.authInfo?.extra?.userId ? 'oauth' : 'shared_key',
     client: ctx.requestInfo?.headers.get('user-agent') ?? null,
+    // Set by Deno.serve below (arrivalHeaders), never taken from the caller as sent
+    hop: hopFrom(ctx.requestInfo?.headers),
   }
   const server = withLogging(new McpServer({ name: 'kr-stock-movers', version: '0.1.0' }), caller)
 
@@ -511,9 +567,16 @@ const handler = createMcpHandler((ctx) => {
       // code), the quote is not used. Without today's snapshot (before 09:05, holidays, tests) KIS is never called.
       const elapsed = sessionElapsed(new Date())
       const today = todayKstIso()
-      const quote = elapsed > 0 && elapsed < 1 && (!day || day >= today)
+      const mayQuote = elapsed > 0 && elapsed < 1 && (!day || day >= today)
+      // The token lookup (memory, else one Postgres read; never KIS) also starts now, so the quote waits only for the
+      // provisional days. A new token is issued only once the quote is known to be needed.
+      const storedToken = mayQuote ? early(step('kis_token', storedKisToken(supabase))) : null
+      const quote = storedToken
         ? provisionalP.then(
-          (p) => p.some((d) => d.bas_dd === today) ? liveQuote(code).then((v) => ({ q: v }), (e: Error) => ({ e })) : null,
+          (p) =>
+            p.some((d) => d.bas_dd === today)
+              ? liveQuote(code, storedToken).then((v) => ({ q: v }), (e: Error) => ({ e }))
+              : null,
           () => null, // the failure is reported by the Promise.all below
         )
         : null
@@ -656,14 +719,18 @@ function unauthorized(reason: string): Response {
 const DB_REGION = Deno.env.get('DB_REGION') || undefined
 
 Deno.serve(async (req) => {
-  if (!shouldForward(DB_REGION, Deno.env.get('SB_REGION'), req.headers)) return handle(req)
+  const arrivedAt = Date.now()
+  if (!shouldForward(DB_REGION, HERE_REGION ?? undefined, req.headers)) {
+    // Handled here: record the hop from the landing copy if this was forwarded (forward_ms in tool_calls)
+    return handle(new Request(req, { headers: arrivalHeaders(req.headers, arrivedAt) }))
+  }
 
   // Buffered (MCP requests are small JSON), so the same body can still be handled here if forwarding fails
   const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer()
   try {
     const res = await fetch(forwardUrl(MCP_URL, req.url), {
       method: req.method,
-      headers: forwardHeaders(req.headers, DB_REGION!),
+      headers: forwardHeaders(req.headers, DB_REGION!, HERE_REGION ?? undefined, Date.now()),
       body,
       redirect: 'manual',
     })
@@ -675,7 +742,7 @@ Deno.serve(async (req) => {
   } catch (e) {
     // Slow (every query crosses regions) but working beats failing
     console.error('forward to', DB_REGION, 'failed, handling here:', (e as Error).message)
-    return handle(new Request(req.url, { method: req.method, headers: req.headers, body }))
+    return handle(new Request(req.url, { method: req.method, headers: arrivalHeaders(req.headers, arrivedAt), body }))
   }
 })
 

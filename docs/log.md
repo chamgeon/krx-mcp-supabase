@@ -267,13 +267,69 @@ What was done and why. Oldest first; new entries go at the bottom.
   `add_telegram_channel` follows the channel alongside its three reads.
 - Trips on the common path: movers/screen 3 → 2, `check_available_dates` 2 → 1, analyze 2 → 1 (+ quote overlapped),
   feed 3–4 → 2–3, search 3 → 2. A test pins which steps overlap.
+- Results (benchmark 10:12 vs 10:42 KST, both in session; tool p50): movers 119 → 79, `check_available_dates`
+  116 → 77, screen 339 → 295, analyze 253 → 234. Real call: movers 136 → 90 ms. A removed query saves a full trip
+  (~40 ms); running two side by side saves only ~20 ms, since each slows by ~15 ms (`history` 41 → 56 ms next to
+  `provisional_days`). Analyze in session is mostly the KIS quote (131–1,779 ms). Client p95 totals are noise
+  (unchanged tools moved by hundreds of ms); compare tool p50 and steps. Feed/search don't show it in the benchmark
+  (shared key: no `user_channels`; the trading day is cached on the warm copy).
+- Cold copy: queries started together all wait out the ~500 ms connection setup at once (three
+  `check_available_dates` queries at 494/494/512 ms), so the call pays it once; parallelizing doesn't hide it.
+
+## 2026-11-17 — KIS token: read early, keep in memory
+- **Done:** in-session `analyze_stock` looks up the stored KIS token at time 0, alongside `history` and
+  `provisional_days` (`storedKisToken`: memory, else one Postgres read; never calls KIS). A new token is issued only
+  once the quote is known to be needed, as before. **Why:** `kis_token` was a 33–53 ms read between
+  `provisional_days` and the quote on every in-session call.
+- **Done:** the token is also kept in memory per function instance (`_shared/kis.ts`, same "10+ minutes left" rule), so a
+  warm instance skips the read. **Why a memory cache alone wasn't enough:** the hourly user lands on a fresh instance
+  almost every time, so the early read is what helps real calls.
+- **Done:** if KIS rejects the token (EGW00121 / EGW00123 / 401), the quote drops the memory copy, re-reads Postgres and
+  retries once, only with a different token (it never issues there, since KIS rate-limits issuance). **Why:** a memory
+  copy can outlive a token another function replaced. Not verified whether KIS invalidates old tokens on re-issue.
+
+## 2026-11-17 — Forward hop in `tool_calls`
+- **Done:** `tool_calls.landed_in`, `forward_ms`, `handled_in`. The landing copy stamps when and where the request
+  landed (`x-mcp-landed-at`, `x-mcp-landed-in`); the Mumbai copy computes `forward_ms` = arrival − stamp and logs it
+  with the call. `handled_in` = `SB_REGION`, which also shows forwards that failed and were handled where they landed.
+  Benchmark calls get the same three values in `_meta`. **Why:** `latency_ms` starts inside the Mumbai copy, so the
+  crossing from Claude's region was not measured anywhere.
+- **Decided:** one-way, in `tool_calls`, not a separate table timed by the landing copy. **Why:** the landing copy
+  knows the round trip only after the answer has streamed back, so it would need its own row (or an update racing
+  Mumbai's insert). One way is enough to judge the hop: the way back is similar, and the two hosts' clocks are
+  NTP-synced (a few ms; a negative value would show skew). Not covered: the answer's streaming time, and Claude → the
+  landing copy (short: it's the region nearest the caller).
+- A caller can't put values in the log: `x-mcp-forward-ms` is always recomputed on arrival, and the landing headers
+  are dropped unless the request carries the forwarded marker with a stamp within ±60 s.
+- First real hop (12:00, `get_telegram_feed`): landed `us-east-1`, ran in `ap-south-1`, `forward_ms` 864 with a 398 ms
+  tool, so more than half the wait came before the tool started. A one-way US East → Mumbai trip is ~100 ms, so most of
+  it was likely start-up: the Mumbai instance was cold (first queries 164 / 355 ms), and the landing one probably too.
+  On that cold instance the feed's early `latest_trading_day` took 355 ms against 164 ms for `user_channels` and
+  became the critical path (398 ms vs ~313 ms in sequence); at 11:48 the two were even (507 / 510 ms). Watch more calls.
+- Tried and dropped (`…000001` added, `…000002` drops them): cold/idle state of both instances per call
+  (`landing_cold`, `landing_idle_ms`, `handled_cold`, `handled_idle_ms`). **Why dropped:** a cold start happens before
+  our code runs, and lands on the MCP handshake (`initialize`, `tools/list`), which isn't logged; the tool call right
+  after it shows as warm. In the 12:26 Samsung calls both instances were "warm" (idle 1 ms–11 s) while every first
+  query still took 185–474 ms.
+- Findings (12:02–12:26, 13 forwarded calls): `forward_ms` 138–864 ms with a floor of ~140 ms (one call per batch),
+  most 500–860 ms, even from a warm landing instance. Unverified guess: a new connection across to Mumbai (TLS over
+  a ~200 ms round trip) vs. a reused one. Three tool calls Claude sent at once ran on one Mumbai instance, and all
+  seven first queries were slow, each by a different amount: queries in flight together each open their own connection.
+- The slow first queries aren't Postgres: `pg_stat_statements` max execution time is 4.8 ms for `user_channels`
+  (68 calls) and 22 ms for `kis_token` (1,158 calls), against 316–507 ms seen on new instances. The time is on the
+  way from the instance to the database API (connection setup), not a cold database cache.
+- Deploy order: `supabase db push --remote` before `supabase functions deploy mcp`; otherwise the `tool_calls` insert
+  fails on the unknown columns (logged to console only; tools keep working).
 
 ## Open
-- Deploy the 11-17 query changes after the `test:db` / `test:mcp` run, then benchmark after the close and compare with
-  the 11-17 pre-change run and the hourly user's real `timings`.
+- Watch the hourly user's real feed `timings` (`user_channels` ∥ `latest_trading_day`, no `bg_stale_check`); the
+  benchmark can't show the per-user path.
+- Benchmark `analyze_stock` after the close, for the off-session gain (expected ~77 → ~55 ms), and in session for the
+  KIS token change (`kis_token` should start at 0 and the quote right after `provisional_days`).
 - Keep-warm experiment: a cron call to `mcp` every few minutes, to keep the Mumbai copy and its connection alive
   (only the Mumbai side; Supabase doesn't promise the same copy serves the next request). Judge by real timings.
-- Log the forward hop's duration from the landing copy, so the real crossing (Claude → Mumbai) is measured.
+- After deploying the hop columns: check `forward_ms` by `landed_in` against the benchmark (Seoul `overhead` ≈ 215 ms
+  ≈ 2 × the one-way hop + both copies' overhead), then judge whether the hop pays off for Claude's regions.
 - Telegram background backfill with a status column, cron resume, and a "still collecting" note in feed/search (8-page
   cap kept).
 - Alert on ingest failures (e.g. a Telegram message): refusals only show in function logs and `last_error` now.
