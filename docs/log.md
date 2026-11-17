@@ -334,19 +334,42 @@ What was done and why. Oldest first; new entries go at the bottom.
   from across the ocean (then cached). The Mumbai instance's cold start moves from the handshake onto the first tool
   call; the user waited through it before as well.
 
+## 2026-11-17 — Why the first query is slow: new workers (idle experiment)
+- Experiment (13:06–13:57 KST, 37 read-only unlogged calls straight to Mumbai via `x-region`, worker identified by
+  `x-deno-execution-id`): a slow first query (381–640 ms) comes with a new worker; a reused worker's first query is
+  51–79 ms even after idling. A new worker also takes ~314–383 ms to start (gateway `x-envoy-upstream-service-time`).
+  Reuse by actual idle time: 5–20 s 6/6, 30–61 s 2/4, 90 s and more 0/8 (incl. 11 and 21 min; the Mac slept through
+  two planned waits, so idle times come from timestamps).
+- Not Postgres (< 5 ms in `pg_stat_statements`), not a cold cache: the cost is opening connections from a new worker
+  to the database API, each query in flight opening its own. Which part (DNS, TCP, TLS, gateway) is unknown; not
+  pursued, since no change of ours depends on it.
+- Supabase docs: on the free plan a worker lives at most 150 s and may be retired earlier when idle ("EarlyDrop"), so
+  hourly calls always get a new worker. Write-up with diagrams: `docs/network.pdf`.
+- Claude's calls land in `us-east-1` because the MCP request comes from Anthropic's servers, not the user's device;
+  Cloudflare in front of Supabase can't cache MCP answers (POST, per-user, live data: `cf-cache-status: DYNAMIC`).
+
+## 2026-11-17 — Benchmark: `--region` and forward
+- **Done:** `deno task bench --region us-east-1` sends `x-region`, so calls land where Claude's do and are forwarded
+  from there; the report adds `fwd` (`forward_ms`). **Why:** from Seoul the forward wasn't Claude's. tool and fwd are
+  comparable to real calls; total isn't (it includes Seoul ↔ US), and a run's spacing decides whether workers are new
+  (back-to-back: warm; a round's first call after a long pause: new). All-cold run (every call on new workers; 150 s
+  is the free plan's worker lifetime): `deno task bench --region us-east-1 --only get_stock_history --n 5 --rounds 5
+  --pause 150`.
+- Tried and dropped: per-worker ids and request counts, the gateway's `x-envoy-upstream-service-time`, a
+  `rest` column (total − tool − fwd), a keep-warm ping script and a connection probe function. **Why:** none answered a
+  question that changes a decision; the first query's time and `fwd` show what matters.
+- Sparse baseline (5 calls, 120 s apart, landing in `us-east-1`): 4 of 5 slow (first query 443–561 ms, `fwd`
+  580–1,001 ms); one fast (96 ms, 113 ms), on a worker that survived 120 s idle.
+
 ## Open
 - Watch the hourly user's real feed `timings` (`user_channels` ∥ `latest_trading_day`, no `bg_stale_check`); the
   benchmark can't show the per-user path.
 - Benchmark `analyze_stock` after the close, for the off-session gain (expected ~77 → ~55 ms), and in session for the
   KIS token change (`kis_token` should start at 0 and the quote right after `provisional_days`).
-- Keep-warm experiment: a cron call to `mcp` every few minutes, to keep the Mumbai copy and its connection alive
-  (only the Mumbai side; Supabase doesn't promise the same copy serves the next request). Judge by real timings.
-- After deploying the handshake change: check that `initialize` is answered in the landing region and `tools/call` in
-  `ap-south-1` (`x-mcp-handled-in`), and that tool calls still log `forward_ms`.
-- Probe the slow first query on a new instance (DNS vs. TLS connect vs. first HTTP request to `/rest/v1`, after
-  different idle times) with a throwaway function, before any keep-warm work.
-- After deploying the hop columns: check `forward_ms` by `landed_in` against the benchmark (Seoul `overhead` ≈ 215 ms
-  ≈ 2 × the one-way hop + both copies' overhead), then judge whether the hop pays off for Claude's regions.
+- Cold calls cost ~0.8–1 s more than warm ones (new worker start-up + opening connections, mostly in Mumbai). Options,
+  undecided: accept it while usage is small; a keep-warm ping (test with a sparse benchmark run against the
+  baseline above); or move the project to `us-east-1`, where Claude's calls land (no forward; a new project and data
+  migration).
 - Telegram background backfill with a status column, cron resume, and a "still collecting" note in feed/search (8-page
   cap kept).
 - Alert on ingest failures (e.g. a Telegram message): refusals only show in function logs and `last_error` now.

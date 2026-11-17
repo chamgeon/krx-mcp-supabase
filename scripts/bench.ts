@@ -1,16 +1,26 @@
 // Benchmark of the read-only MCP tools against the deployed function (production data volume; the local seed is too
 // small to time anything). For each call it records:
-//   total     client wall time of the tools/call request (what a user waits for, minus the LLM)
-//   tool      server-side latency_ms, returned in the result's _meta (the tool handler only, as in tool_calls)
-//   overhead  total - tool (network, gateway, auth, MCP request handling)
+//   total  client wall time of the tools/call request (what a user waits for, minus the LLM)
+//   tool   server-side latency_ms, returned in the result's _meta (the tool handler only, as in tool_calls)
+//   fwd    forward_ms from _meta: the landing worker → the worker next to the database starting (one way; includes
+//          that worker's start-up when it is new). — when the call landed in the database's region (not forwarded).
 //
-//   deno task bench                                  # 50 calls per case: 5 rounds of 10, 60 s apart, after 1 warm-up
-//   deno task bench -- --n 20 --rounds 2 --pause 10
-//   deno task bench -- --only get_telegram_feed
+//   deno task bench                         # 50 calls per case: 5 rounds of 10, 60 s apart, after 1 warm-up
+//   deno task bench --region us-east-1      # land where Claude's calls land, and be forwarded from there
+//   deno task bench --n 20 --rounds 2 --pause 10
+//   deno task bench --only get_telegram_feed
+//
+// All-cold run, like Claude's occasional calls: one call per round, rounds 150 s apart. A worker lives at most 150 s
+// on the free plan (Supabase docs), so each call starts new workers (unless other traffic started one meanwhile).
+// Needs --only: the cases of a round run back to back, so only a round's first call is cold.
+//   deno task bench --region us-east-1 --only get_stock_history --n 5 --rounds 5 --pause 150
+//
+// --region sets Supabase's x-region header, so the request lands in that region instead of the one nearest this
+// machine. tool and fwd then match calls from Claude (us-east-1); total still includes the trip from here.
 //
 // Uses the shared ?key= URL (MCP_ACCESS_KEY from supabase/.env, never printed) with the User-Agent krx-bench/<run id>.
-// The server recognizes that pair: it returns latency_ms in _meta and does not log the call, so tool_calls stays
-// real usage only. Results go to bench-results/<run id>.json (gitignored).
+// The server recognizes that pair: it returns latency_ms, timings and the hop in _meta and does not log the call, so
+// tool_calls stays real usage only. Results go to bench-results/<run id>.json (gitignored).
 //
 // Arguments mirror real usage (tool_calls.args): no date where real calls omit it (so the latest day, live during the
 // session, and analyze_stock's live KIS quote), Telegram reads with short `since` windows. Not covered: the write tools
@@ -38,15 +48,19 @@ const CASES: { label: string; tool: string; args: () => Record<string, unknown> 
   { label: 'find_stock *', tool: 'find_stock', args: () => ({ name: '삼성' }) },
 ]
 
-function flag(name: string, fallback: number): number {
+function arg(name: string): string | undefined {
   const i = Deno.args.indexOf(`--${name}`)
-  return i >= 0 && Deno.args[i + 1] ? Number(Deno.args[i + 1]) : fallback
+  return i >= 0 ? Deno.args[i + 1] : undefined
 }
-const N = flag('n', 50)
-const ROUNDS = Math.max(1, Math.min(N, flag('rounds', 5)))
-const PAUSE_S = flag('pause', 60)
-const onlyAt = Deno.args.indexOf('--only')
-const ONLY = onlyAt >= 0 ? Deno.args[onlyAt + 1] : ''
+const N = Number(arg('n') ?? 50)
+const ROUNDS = Math.max(1, Math.min(N, Number(arg('rounds') ?? 5)))
+const PAUSE_S = Number(arg('pause') ?? 60)
+const ONLY = arg('only') ?? ''
+const REGION = arg('region') ?? ''
+if (REGION && !/^[a-z]{2}-[a-z]+-\d$/.test(REGION)) {
+  console.error(`--region: not a region name (e.g. us-east-1): ${REGION}`)
+  Deno.exit(1)
+}
 
 function env(name: string): string {
   const text = Deno.readTextFileSync(new URL('../supabase/.env', import.meta.url))
@@ -61,12 +75,20 @@ const RUN = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z'
 // ---- calls ----------------------------------------------------------------------------------------
 
 type TimedStep = { step: string; start: number; ms: number }
+type Meta = {
+  latency_ms?: number
+  timings?: TimedStep[]
+  hop?: { landedIn?: string | null; forwardMs?: number | null; handledIn?: string | null }
+}
 type Call = {
   label: string
   round: number
   warmup: boolean
   total_ms: number
   tool_ms: number | null
+  forward_ms: number | null
+  landed_in: string | null
+  handled_in: string | null
   steps: TimedStep[]
   bytes: number
   error?: string
@@ -74,33 +96,49 @@ type Call = {
 
 const url = new URL(MCP)
 url.searchParams.set('key', env('MCP_ACCESS_KEY'))
+const headers: Record<string, string> = { 'User-Agent': `krx-bench/${RUN}` }
+if (REGION) headers['x-region'] = REGION
 const client = new Client({ name: 'krx-bench', version: '1.0.0' })
-await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { 'User-Agent': `krx-bench/${RUN}` } } }))
+await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers } }))
 
 const cases = CASES.filter((c) => !ONLY || c.tool === ONLY)
 const calls: Call[] = []
 
 async function one(c: (typeof CASES)[number], round: number, warmup: boolean) {
   const t0 = performance.now()
-  let bytes = 0, toolMs: number | null = null, steps: TimedStep[] = [], error: string | undefined
+  let bytes = 0, meta: Meta = {}, error: string | undefined
   try {
     const r = await client.callTool({ name: c.tool, arguments: c.args() }) as {
       isError?: boolean
       content: { text?: string }[]
-      _meta?: { latency_ms?: number; timings?: TimedStep[] }
+      _meta?: Meta
     }
     bytes = r.content.reduce((n, x) => n + (x.text?.length ?? 0), 0)
-    toolMs = r._meta?.latency_ms ?? null
-    steps = r._meta?.timings ?? []
+    meta = r._meta ?? {}
     if (r.isError) error = r.content[0]?.text?.slice(0, 200)
   } catch (e) {
     error = (e as Error).message
   }
-  calls.push({ label: c.label, round, warmup, total_ms: performance.now() - t0, tool_ms: toolMs, steps, bytes, error })
+  calls.push({
+    label: c.label,
+    round,
+    warmup,
+    total_ms: performance.now() - t0,
+    tool_ms: meta.latency_ms ?? null,
+    forward_ms: meta.hop?.forwardMs ?? null,
+    landed_in: meta.hop?.landedIn ?? meta.hop?.handledIn ?? null, // not forwarded: it landed where it ran
+    handled_in: meta.hop?.handledIn ?? null,
+    steps: meta.timings ?? [],
+    bytes,
+    error,
+  })
 }
 
 const perRound = Array.from({ length: ROUNDS }, (_, r) => Math.floor(N / ROUNDS) + (r < N % ROUNDS ? 1 : 0))
-console.log(`run ${RUN}: ${cases.length} cases × ${N} calls (${ROUNDS} rounds, ${PAUSE_S}s apart) + 1 warm-up each`)
+console.log(
+  `run ${RUN}: ${cases.length} cases × ${N} calls (${ROUNDS} rounds, ${PAUSE_S}s apart) + 1 warm-up each` +
+    (REGION ? `, landing in ${REGION}` : ''),
+)
 for (const c of cases) {
   await one(c, 0, true)
   // A deployed function without the benchmark change neither returns _meta nor skips logging: stop after one call
@@ -123,10 +161,6 @@ for (let r = 0; r < ROUNDS; r++) {
 }
 await client.close()
 
-if (calls.some((c) => !c.warmup && c.tool_ms == null && !c.error)) {
-  console.warn('\nno _meta.latency_ms in some results: is the deployed mcp function older than the benchmark change?')
-}
-
 // ---- report ---------------------------------------------------------------------------------------
 
 const q = (xs: number[], p: number) => {
@@ -134,39 +168,45 @@ const q = (xs: number[], p: number) => {
   const s = [...xs].sort((a, b) => a - b)
   return s[Math.min(s.length - 1, Math.ceil((p / 100) * s.length) - 1)] // nearest rank
 }
+const nums = (xs: (number | null)[]) => xs.filter((x): x is number => x != null)
+const p5095 = (xs: number[]) => ({ p50: q(xs, 50), p95: q(xs, 95) })
+
 const report = cases.map((c) => {
   const xs = calls.filter((x) => x.label === c.label && !x.warmup && !x.error)
   const total = xs.map((x) => x.total_ms)
-  const tool = xs.filter((x) => x.tool_ms != null).map((x) => x.tool_ms!)
-  const overhead = xs.filter((x) => x.tool_ms != null).map((x) => x.total_ms - x.tool_ms!)
   const warm = calls.find((x) => x.label === c.label && x.warmup)!
   return {
     label: c.label,
     n: xs.length,
     errors: calls.filter((x) => x.label === c.label && x.error).length,
     kb: xs.length ? Math.round(xs[0].bytes / 1024) : 0,
-    warmup: { total: warm.total_ms, tool: warm.tool_ms },
-    total: { p50: q(total, 50), p95: q(total, 95), max: Math.max(...total) },
-    tool: { p50: q(tool, 50), p95: q(tool, 95) },
-    overhead: { p50: q(overhead, 50), p95: q(overhead, 95) },
+    warmup: { total: warm.total_ms, tool: warm.tool_ms, forward: warm.forward_ms },
+    total: { ...p5095(total), max: Math.max(...total) },
+    tool: p5095(nums(xs.map((x) => x.tool_ms))),
+    forward: p5095(nums(xs.map((x) => x.forward_ms))),
   }
 })
 
 const ms = (x: number | null) => (x == null || Number.isNaN(x) ? '—' : String(Math.round(x)))
 const pad = (s: string, n: number) => s + ' '.repeat(Math.max(0, n - [...s].length))
 const lpad = (s: string, n: number) => ' '.repeat(Math.max(0, n - s.length)) + s
-const cols = ['n', 'err', 'KB', 'warm-up', 'total p50', 'p95', 'max', 'tool p50', 'p95', 'ovh p50', 'p95']
+const regions = (pick: (c: Call) => string | null) =>
+  [...new Set(calls.filter((c) => !c.error).map(pick).filter(Boolean))].join(', ') || '—'
+
+console.log(`\nlanded in ${regions((c) => c.landed_in)} · ran in ${regions((c) => c.handled_in)}`)
+const cols = ['n', 'err', 'KB', 'warm-up', 'total p50', 'p95', 'max', 'tool p50', 'p95', 'fwd p50', 'p95']
 console.log('\n' + pad('case', 30) + cols.map((h, i) => lpad(h, i < 3 ? 4 : 10)).join(''))
 for (const r of report) {
   console.log(
     pad(r.label, 30) + [r.n, r.errors, r.kb].map((v) => lpad(String(v), 4)).join('') +
-      [r.warmup.total, r.total.p50, r.total.p95, r.total.max, r.tool.p50, r.tool.p95, r.overhead.p50, r.overhead.p95]
+      [r.warmup.total, r.total.p50, r.total.p95, r.total.max, r.tool.p50, r.tool.p95, r.forward.p50, r.forward.p95]
         .map((v) => lpad(ms(v), 10)).join(''),
   )
 }
 console.log('* not used in real calls yet')
+console.log('fwd: landing region → database region, one way (— = not forwarded)')
 
-// Where the tool time goes: median duration and start of each step, per case (bg_ = background work, not waited on)
+// Where the tool time goes: median duration and start of each step, per case
 console.log('\nsteps (p50 ms, p50 start):')
 for (const c of cases) {
   const xs = calls.filter((x) => x.label === c.label && !x.warmup && !x.error)
@@ -183,6 +223,6 @@ if (errs.length) console.log('\nerrors:\n  ' + errs.slice(0, 5).map((e) => `${e.
 await Deno.mkdir(new URL('../bench-results/', import.meta.url), { recursive: true })
 await Deno.writeTextFile(
   new URL(`../bench-results/${RUN}.json`, import.meta.url),
-  JSON.stringify({ run: RUN, target: MCP, n: N, rounds: ROUNDS, pause_s: PAUSE_S, report, calls }, null, 1),
+  JSON.stringify({ run: RUN, target: MCP, region: REGION || null, n: N, rounds: ROUNDS, pause_s: PAUSE_S, report, calls }, null, 1),
 )
 console.log(`\nsaved bench-results/${RUN}.json`)
