@@ -225,6 +225,12 @@ test('screen_stocks: 60/120-day fields only when asked for', async () => {
   assertEquals(long.stocks[0].breakout_120, true)
 })
 
+test('screen_stocks: a weekend says so', async () => {
+  const r = await call('screen_stocks', { date: '20261114' })
+  assertEquals(r.date, '2026-11-14')
+  assertStringIncludes(r.error, 'No data for this date')
+})
+
 test('screen_stocks: inconsistent box windows get a clear error', async () => {
   const r = await call('screen_stocks', { date: DAY, sideways_days: 5, sideways_recent_days: 5 })
   assertEquals(r.error, 'sideways_recent_days must be smaller than sideways_days.')
@@ -236,6 +242,16 @@ test('analyze_stock: by name, past date, no live quote', async () => {
   const codes = r.signals.map((s: Json) => s.code)
   for (const c of ['BREAKOUT_20D', 'BREAKOUT_60D', 'BREAKOUT_120D']) assert(codes.includes(c), `${c} in ${codes}`)
   assert(!('live_quote' in r) && !('live_quote_error' in r))
+})
+
+test('analyze_stock / screen_stocks: latest day is the provisional snapshot', async () => {
+  // analyze reads the status from the provisional days, since it learns the day only from the history
+  const a = await call('analyze_stock', { stock: '900001' })
+  assertEquals([a.date, a.data_status, a.as_of], [LIVE_DAY, '장중 (intraday, provisional)', '2026-11-16 11:00 KST'])
+  // a past day that still has a stale live_prices row is final (KRX replaced it)
+  assertEquals((await call('analyze_stock', { stock: '900001', date: DAY })).data_status, '확정치 (KRX official)')
+  const s = await call('screen_stocks', {})
+  assertEquals([s.date, s.data_status], [LIVE_DAY, '장중 (intraday, provisional)'])
 })
 
 test('analyze_stock: new listing gets SHORT_HISTORY', async () => {
@@ -422,9 +438,40 @@ test('parallel steps show as overlapping (check_available_dates)', async () => {
   await bench.close()
   const t = r._meta?.timings ?? []
   const names = t.map((s) => s.step)
-  for (const s of ['dates_count', 'dates_first', 'dates_last', 'data_status']) assert(names.includes(s), `${s} in ${names}`)
+  for (const s of ['dates_count', 'dates_first', 'dates_last']) assert(names.includes(s), `${s} in ${names}`)
+  assert(!names.includes('data_status'), `the status comes with the last day's row: ${names}`)
   const starts = t.filter((s) => s.step.startsWith('dates_')).map((s) => s.start)
   assert(Math.max(...starts) - Math.min(...starts) < 20, `the three date queries start together: ${starts}`)
+})
+
+// Each removed round trip is ~40–50 ms in production; these pin which queries wait for which
+test('fewer sequential queries: movers, screen, analyze, search', async () => {
+  const bench = await connect({ key: KEY }, 'krx-bench/test-run')
+  const steps = async (name: string, args: Json) => {
+    const r = await bench.callTool({ name, arguments: args }) as { _meta?: { timings?: { step: string; start: number }[] } }
+    return r._meta?.timings ?? []
+  }
+  const together = (t: { step: string; start: number }[], a: string, b: string) => {
+    const [x, y] = [t.find((s) => s.step === a), t.find((s) => s.step === b)]
+    assert(x && y, `${a} and ${b} in ${t.map((s) => s.step)}`)
+    assert(Math.abs(x.start - y.start) < 20, `${a} and ${b} start together: ${JSON.stringify(t)}`)
+  }
+  try {
+    // latest day: its row carries the status, so no data_status query
+    for (const tool of ['get_daily_movers', 'screen_stocks']) {
+      const names = (await steps(tool, {})).map((s) => s.step)
+      assert(names.includes('latest_date') && !names.includes('data_status'), `${tool}: ${names}`)
+    }
+    // a given date: the status row is fetched alongside the main query
+    together(await steps('get_daily_movers', { date: DAY }), 'data_status', 'movers')
+    together(await steps('screen_stocks', { date: DAY }), 'data_status', 'screen_stocks_rpc')
+    together(await steps('analyze_stock', { stock: '900001' }), 'history', 'provisional_days')
+    // the trading day is cached per instance for 5 minutes, so it may not be queried at all
+    const search = await steps('search_telegram', { query: '돌파전자', since: '2026-01-01' })
+    if (search.some((s) => s.step === 'latest_trading_day')) together(search, 'search', 'latest_trading_day')
+  } finally {
+    await bench.close()
+  }
 })
 
 // Close the shared client last so its stream doesn't outlive the tests

@@ -40,12 +40,46 @@ const SHEET1_MIN_RATE = 15 // 등락률 +15% 이상
 const SHEET2_MIN_RATE = 7 // 등락률 +7% 이상
 const SHEET2_MIN_TRDVAL = 50_000_000_000 // 거래대금 500억원 이상
 
+// One row of available_dates. It carries the day's status, so the status never needs a query of its own: tools read
+// it with the latest day, or fetch it in parallel with their main query.
+type DayRow = { bas_dd: string; final: boolean | null; as_of: string | null }
+const DAY_COLUMNS = 'bas_dd, final, as_of'
+
+async function dayRow(day: string): Promise<DayRow | null> {
+  const { data, error } = await step('data_status', supabase.from('available_dates').select(DAY_COLUMNS).eq('bas_dd', day))
+  if (error) throw new Error(error.message)
+  return (data?.[0] as DayRow | undefined) ?? null
+}
+
+// The latest day with data, with its status (available_dates holds the same days as prices)
+async function latestDayRow(): Promise<DayRow | null> {
+  const { data, error } = await step('latest_date', supabase
+    .from('available_dates')
+    .select(DAY_COLUMNS)
+    .order('bas_dd', { ascending: false })
+    .limit(1))
+  if (error) throw new Error(error.message)
+  return (data?.[0] as DayRow | undefined) ?? null
+}
+
+async function latestDate(): Promise<string | null> {
+  return (await latestDayRow())?.bas_dd ?? null
+}
+
+// Days that are still provisional (KIS rows not yet replaced by KRX); usually one. Every other day is final, so this
+// gives any day's status without knowing the day first.
+async function provisionalDays(): Promise<DayRow[]> {
+  const { data, error } = await step('provisional_days', supabase.from('available_dates').select(DAY_COLUMNS).eq('final', false))
+  if (error) throw new Error(error.message)
+  return (data ?? []) as DayRow[]
+}
+
+const NO_DATA_FOR_DATE = 'No data for this date. It may be a holiday/weekend, or the day has not closed yet ' +
+  '(data appears from ~09:05 KST). Call check_available_dates.'
+
 // Same-day rows come from KIS snapshots (every 5 minutes during the session) and are provisional until KRX's
 // official data replaces them the next morning
-async function dataStatus(day: string) {
-  const { data, error } = await step('data_status', supabase.from('available_dates').select('final, as_of').eq('bas_dd', day))
-  if (error) throw new Error(error.message)
-  const d = data?.[0]
+function dataStatus(d: Pick<DayRow, 'final' | 'as_of'> | null | undefined) {
   if (!d || d.final !== false) return { data_status: '확정치 (KRX official)' }
   const status = {
     data_status: '잠정치 (provisional)',
@@ -87,16 +121,6 @@ async function liveQuote(code: string) {
     mktcap_eok: num(o.hts_avls),
     vs_prev_day_volume_pct: num(o.prdy_vrss_vol_rate),
   }
-}
-
-async function latestDate(): Promise<string | null> {
-  const { data, error } = await step('latest_date', supabase
-    .from('prices')
-    .select('bas_dd')
-    .order('bas_dd', { ascending: false })
-    .limit(1))
-  if (error) throw new Error(error.message)
-  return data?.[0]?.bas_dd ?? null
 }
 
 function json(data: unknown) {
@@ -208,32 +232,32 @@ const handler = createMcpHandler((ctx) => {
       annotations: { readOnlyHint: true },
     },
     async ({ date }) => {
-      const day = date ? normDate(date) : await latestDate()
-      if (!day) return json({ error: 'No data ingested yet.' })
-
-      const { data, error } = await step('movers', supabase
-        .from('prices')
-        .select('*')
-        .eq('bas_dd', day)
-        .gte('fluc_rt', SHEET2_MIN_RATE)
-        .order('fluc_rt', { ascending: false }))
-      if (error) throw new Error(error.message)
-
-      const rows = (data ?? []) as Row[]
-      if (rows.length === 0) {
-        const { count } = await step('day_count', supabase
+      const movers = (day: string) =>
+        step('movers', supabase
           .from('prices')
-          .select('*', { count: 'exact', head: true })
-          .eq('bas_dd', day))
-        if (!count) {
-          return json({
-            date: day,
-            error:
-              'No data for this date. It may be a holiday/weekend, or the day has not closed yet ' +
-              '(data appears from ~09:05 KST). Call check_available_dates.',
-          })
-        }
+          .select('*')
+          .eq('bas_dd', day)
+          .gte('fluc_rt', SHEET2_MIN_RATE)
+          .order('fluc_rt', { ascending: false }))
+
+      // With a date, its status row and the movers are fetched together; without one, the latest row is the status
+      let day: string
+      let status: DayRow | null
+      let res: Awaited<ReturnType<typeof movers>>
+      if (date) {
+        day = normDate(date)
+        ;[status, res] = await Promise.all([dayRow(day), movers(day)])
+      } else {
+        status = await latestDayRow()
+        if (!status) return json({ error: 'No data ingested yet.' })
+        day = status.bas_dd
+        res = await movers(day)
       }
+      if (res.error) throw new Error(res.error.message)
+
+      // available_dates has a row for every day with data, so no row means no data
+      if (!status) return json({ date: day, error: NO_DATA_FOR_DATE })
+      const rows = (res.data ?? []) as Row[]
 
       const sheet1 = rows.filter((r) => (r.fluc_rt ?? 0) >= SHEET1_MIN_RATE)
       const sheet2 = rows.filter(
@@ -247,7 +271,7 @@ const handler = createMcpHandler((ctx) => {
 
       return json({
         date: day,
-        ...(await dataStatus(day)),
+        ...dataStatus(status),
         rules: {
           sheet1: `등락률 >= +${SHEET1_MIN_RATE}%`,
           sheet2: `등락률 >= +${SHEET2_MIN_RATE}% AND 거래대금 >= 500억원, sheet1 제외`,
@@ -353,10 +377,12 @@ const handler = createMcpHandler((ctx) => {
       if (a.sideways_recent_days >= a.sideways_days) {
         return json({ error: 'sideways_recent_days must be smaller than sideways_days.' })
       }
-      const day = a.date ? normDate(a.date) : await latestDate()
+      // As in get_daily_movers: the latest row carries the status, or a given date's row is fetched alongside
+      const latest = a.date ? null : await latestDayRow()
+      const day = a.date ? normDate(a.date) : latest?.bas_dd
       if (!day) return json({ error: 'No data ingested yet.' })
 
-      const { data, error } = await step('screen_stocks_rpc', supabase.rpc('screen_stocks', {
+      const [status, { data, error }] = await Promise.all([latest ?? dayRow(day), step('screen_stocks_rpc', supabase.rpc('screen_stocks', {
         p_date: day,
         p_market: a.market ?? null,
         p_include_untraded: a.include_untraded,
@@ -380,8 +406,10 @@ const handler = createMcpHandler((ctx) => {
         p_max_volatility: a.max_volatility ?? null,
         p_sort: a.sort,
         p_limit: a.limit,
-      }))
+      }))])
       if (error) throw new Error(error.message)
+      // A holiday/weekend used to return 0 stocks marked 확정치; no status row means the day has no data
+      if (!status) return json({ date: day, error: NO_DATA_FOR_DATE })
 
       const rows = (data ?? []) as Record<string, any>[]
       const { date: _d, limit: _l, ...filters } = a
@@ -391,7 +419,7 @@ const handler = createMcpHandler((ctx) => {
       const with120 = a.breakout_days?.includes(120) ?? false
       return json({
         date: day,
-        ...(await dataStatus(day)),
+        ...dataStatus(status),
         filters,
         notes: [
           ...(with120 ? [] : [
@@ -471,23 +499,42 @@ const handler = createMcpHandler((ctx) => {
         else return json({ error: data?.length ? 'Ambiguous name; pass a 종목코드.' : 'No stock found.', candidates: data })
       }
       code = code.toUpperCase()
+      const day = date ? normDate(date) : null
+
+      // The status comes from the provisional days, fetched alongside the history, since the analysed day (the
+      // stock's latest row) isn't known until the history arrives.
+      const provisionalP = provisionalDays()
+
+      // The live quote is only shown when the analysed day is today during the session. It starts as soon as the
+      // provisional days show that today has a snapshot (every listed stock then has a row for today), so it runs
+      // alongside the rest of the history query. If the stock's latest row is older after all (e.g. a delisted
+      // code), the quote is not used. Without today's snapshot (before 09:05, holidays, tests) KIS is never called.
+      const elapsed = sessionElapsed(new Date())
+      const today = todayKstIso()
+      const quote = elapsed > 0 && elapsed < 1 && (!day || day >= today)
+        ? provisionalP.then(
+          (p) => p.some((d) => d.bas_dd === today) ? liveQuote(code).then((v) => ({ q: v }), (e: Error) => ({ e })) : null,
+          () => null, // the failure is reported by the Promise.all below
+        )
+        : null
 
       let q = supabase.from('prices').select('*').eq('isu_cd', code)
-      if (date) q = q.lte('bas_dd', normDate(date))
-      const { data, error } = await step('history', q.order('bas_dd', { ascending: false }).limit(250))
+      if (day) q = q.lte('bas_dd', day)
+      const [{ data, error }, provisional] = await Promise.all([
+        step('history', q.order('bas_dd', { ascending: false }).limit(250)),
+        provisionalP,
+      ])
       if (error) throw new Error(error.message)
       const rows = (data ?? []) as Row[]
-      if (rows.length === 0) return json({ error: `No data for ${code}${date ? ` on or before ${normDate(date)}` : ''}.` })
-      const result: Record<string, unknown> = { ...analyze(rows, opts), ...(await dataStatus(rows[0].bas_dd)) }
-      const elapsed = sessionElapsed(new Date())
-      if (rows[0].bas_dd === todayKstIso() && elapsed > 0 && elapsed < 1) {
-        try {
-          result.live_quote = await liveQuote(code)
-        } catch (e) {
-          result.live_quote_error = (e as Error).message
-        }
+      if (rows.length === 0) return json({ error: `No data for ${code}${day ? ` on or before ${day}` : ''}.` })
+      const result: Record<string, unknown> = {
+        ...analyze(rows, opts),
+        ...dataStatus(provisional.find((p) => p.bas_dd === rows[0].bas_dd)),
       }
-      return json(date && result.date !== normDate(date) ? { note: `No row on ${normDate(date)}; using ${result.date}.`, ...result } : result)
+      const r = quote && rows[0].bas_dd === today ? await quote : null
+      if (r && 'q' in r) result.live_quote = r.q
+      else if (r) result.live_quote_error = r.e.message
+      return json(day && result.date !== day ? { note: `No row on ${day}; using ${result.date}.`, ...result } : result)
     },
   )
 
@@ -527,7 +574,8 @@ const handler = createMcpHandler((ctx) => {
       annotations: { readOnlyHint: true },
     },
     async ({ date }) => {
-      const dates = () => supabase.from('available_dates').select('bas_dd, row_count')
+      // Rows carry final / as_of, so the status needs no query of its own
+      const dates = () => supabase.from('available_dates').select('bas_dd, row_count, final, as_of')
 
       if (date) {
         const day = normDate(date)
@@ -538,7 +586,7 @@ const handler = createMcpHandler((ctx) => {
         ])
         for (const r of [hit, prev, next]) if (r.error) throw new Error(r.error.message)
         if (hit.data?.length) {
-          return json({ date: day, available: true, stocks: hit.data[0].row_count, ...(await dataStatus(day)) })
+          return json({ date: day, available: true, stocks: hit.data[0].row_count, ...dataStatus(hit.data[0]) })
         }
         return json({
           date: day,
@@ -555,12 +603,12 @@ const handler = createMcpHandler((ctx) => {
         step('dates_last', dates().order('bas_dd', { ascending: false }).limit(1)),
       ])
       for (const r of [all, first, last]) if (r.error) throw new Error(r.error.message)
-      const lastDay = last.data?.[0]?.bas_dd ?? null
+      const lastRow = last.data?.[0]
       return json({
         total_days: all.count ?? 0,
         first: first.data?.[0]?.bas_dd ?? null,
-        last: lastDay,
-        ...(lastDay ? await dataStatus(lastDay) : {}),
+        last: lastRow?.bas_dd ?? null,
+        ...(lastRow ? dataStatus(lastRow) : {}),
       })
     },
   )

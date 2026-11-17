@@ -247,16 +247,30 @@ What was done and why. Oldest first; new entries go at the bottom.
   say a channel is still filling. **Why:** following a new channel took 8–21 s. Not done yet.
 - `telegram_channels.active` only stops polling; stored posts stay readable. Nothing in the code sets it to false.
 
+## 2026-11-17 — Fewer sequential queries in the MCP tools
+- Checked first that parallel queries really overlap on Edge: in real feed calls `bg_stale_check` and `messages` started
+  together at ~75 ms each, and the benchmark's three `check_available_dates` queries took 60/70/81 ms vs ~40 ms alone.
+  Only the first query on a fresh copy pays connection setup.
+- **Done:** the day's status comes from its `available_dates` row (`bas_dd, final, as_of`) instead of a separate
+  `data_status` query after the main one. Movers and screen without a date read the latest row once (day + status);
+  with a date, they fetch the row alongside the main query. A missing row means no data, which replaces movers'
+  `day_count`. `check_available_dates` selects `final, as_of` with its date queries, so it has no status query left.
+- **Done:** `screen_stocks` on a day without data (weekend, holiday) returns the same "No data for this date" error as
+  movers. **Why:** it returned `count: 0` marked 확정치, which reads as "nothing matched"; the status row now shows it.
+- **Done:** `analyze_stock` learns its day only from the history (a stock's latest row), so it fetches the provisional
+  days (`final = false`, from `live_prices`, usually one) alongside; every other day is final. The live quote starts
+  as soon as those show today has a snapshot, instead of after history and status. **Why not start it at once:**
+  during the session it would call KIS even on days without a snapshot (tests use dummy keys and must not reach KIS).
+- **Done:** Telegram tools start `latest_trading_day` first (`early()`, which keeps an un-awaited failure from becoming
+  an unhandled rejection). In the feed, the user's channels and the trading day start together; with a channel, the
+  posts are read alongside the existence check. Removed the background refresh (`refreshStale`, decided 11-16).
+  `add_telegram_channel` follows the channel alongside its three reads.
+- Trips on the common path: movers/screen 3 → 2, `check_available_dates` 2 → 1, analyze 2 → 1 (+ quote overlapped),
+  feed 3–4 → 2–3, search 3 → 2. A test pins which steps overlap.
+
 ## Open
-- Commit the region forwarding (`mcp/forward.ts`, its test, the `index.ts` handler); deployed since 16:18 but
-  uncommitted.
-- Parallelize independent queries; each removed trip saves ~40–50 ms warm (findings 2026-11-16):
-  - feed / search / add channel: start `latest_trading_day` at the beginning instead of after the posts; drop
-    `bg_stale_check` (decided above);
-  - `data_status` only needs the day: run it next to the main query in movers, screen, analyze (next to the KIS quote);
-  - `check_available_dates`: select `final, as_of` in the `last` query instead of a separate `data_status`; with a
-    date, run `data_status` with the other three;
-  - then benchmark after the close and compare with the hourly user's real `timings`.
+- Deploy the 11-17 query changes after the `test:db` / `test:mcp` run, then benchmark after the close and compare with
+  the 11-17 pre-change run and the hourly user's real `timings`.
 - Keep-warm experiment: a cron call to `mcp` every few minutes, to keep the Mumbai copy and its connection alive
   (only the Mumbai side; Supabase doesn't promise the same copy serves the next request). Judge by real timings.
 - Log the forward hop's duration from the landing copy, so the real crossing (Claude → Mumbai) is measured.

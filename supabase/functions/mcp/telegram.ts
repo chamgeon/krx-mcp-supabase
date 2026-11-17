@@ -10,7 +10,6 @@ import { step } from './timing.ts'
 const MAX_CHANNELS = 50 // cap on shared collection, so open adding can't turn the server into a crawler
 const BACKFILL_DAYS = 30
 const BACKFILL_MAX_PAGES = 8 // 20 posts per page
-const STALE_MS = 5 * 60_000 // after a read, refresh (in the background) channels last polled longer ago than this
 
 type Msg = {
   username: string
@@ -36,11 +35,11 @@ async function latestTradingDay(supabase: SupabaseClient): Promise<string | null
   return latestDay.day
 }
 
-// Runs work after the response is sent (Supabase Edge Runtime), so reads never wait for a Telegram fetch.
-declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined
-function inBackground(p: Promise<unknown>) {
-  const safe = p.catch((e) => console.error('background refresh failed:', (e as Error).message))
-  if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(safe)
+// For a query started before it's needed, so it runs alongside others: an early return can leave it un-awaited, and
+// this keeps its failure from becoming an unhandled rejection. Awaiting it still throws.
+function early<T>(p: Promise<T>): Promise<T> {
+  p.catch(() => {})
+  return p
 }
 
 function json(data: unknown) {
@@ -59,17 +58,21 @@ export function sinceIso(since: string | undefined, defaultDays: number): string
 }
 
 export function registerTelegramTools(server: McpServer, supabase: SupabaseClient, userId: string | null) {
+  // The latest trading day is needed for 종목명 lookups, and depends on nothing, so tools start it first:
+  // const day = early(latestTradingDay(supabase)), and pass the promise on.
+  type Day = Promise<string | null>
+
   // 종목코드 → 종목명 for the codes in a result set (latest trading day)
-  async function stockNames(codes: string[]): Promise<Map<string, string>> {
+  async function stockNames(codes: string[], dayP: Day): Promise<Map<string, string>> {
     const uniq = [...new Set(codes)]
     if (!uniq.length) return new Map()
-    const day = await latestTradingDay(supabase)
+    const day = await dayP
     const { data } = await step('stock_names', supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', day).in('isu_cd', uniq))
     return new Map((data ?? []).map((r) => [r.isu_cd, r.isu_nm]))
   }
 
-  async function present(msgs: Msg[], maxChars: number, snippetOf?: (m: Msg) => string) {
-    const names = await stockNames(msgs.flatMap((m) => m.stock_codes))
+  async function present(msgs: Msg[], maxChars: number, day: Day, snippetOf?: (m: Msg) => string) {
+    const names = await stockNames(msgs.flatMap((m) => m.stock_codes), day)
     return msgs.map((m) => ({
       channel: m.username,
       time: kst(m.ts),
@@ -81,15 +84,6 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       ...(m.stock_codes.length ? { stocks: m.stock_codes.map((c) => ({ code: c, name: names.get(c) ?? null })) } : {}),
       link: `https://t.me/${m.username}/${m.msg_id}`,
     }))
-  }
-
-  // Polls channels whose last poll is older than STALE_MS (one request each), so reads are fresh between cron runs.
-  async function refreshStale(channels: string[]) {
-    // runs in the background (inBackground): only recorded if it finishes before the response
-    const { data } = await step('bg_stale_check', supabase.from('telegram_channels').select('username, last_polled_at').in('username', channels))
-    const stale = (data ?? []).filter((c) => !c.last_polled_at || Date.now() - new Date(c.last_polled_at).getTime() > STALE_MS)
-    if (!stale.length) return
-    for (const c of stale) await syncChannel(supabase, c.username, () => stockIndex(supabase), { maxPages: 2 })
   }
 
   // Makes sure a channel is collected: a new one is checked (public preview), saved, and backfilled ~30 days; an
@@ -128,10 +122,10 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     return { ok: true, status: status === 'already collected' ? 'already collected (refreshed)' : status }
   }
 
-  async function resolveStock(stock: string): Promise<string | null> {
+  async function resolveStock(stock: string, dayP: Day): Promise<string | null> {
     const s = stock.trim()
     if (/^\d{6}$/.test(s)) return s
-    const day = await latestTradingDay(supabase)
+    const day = await dayP
     const { data } = await step('resolve_stock', supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', day).eq('isu_nm', s).limit(1))
     return data?.[0]?.isu_cd ?? null
   }
@@ -150,11 +144,12 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     async ({ channel }) => {
       const name = channelName(channel)
       if (!name) return json({ error: `Not a valid Telegram channel name: ${channel}` })
+      const day = early(latestTradingDay(supabase))
       const r = await ensureChannel(name, { refresh: true })
       if (!r.ok) return json({ channel: name, error: r.error })
-      const followed = await follow([name])
 
-      const [{ data: ch }, { count }, { data: latest }] = await Promise.all([
+      const [followed, { data: ch }, { count }, { data: latest }] = await Promise.all([
+        follow([name]),
         supabase.from('telegram_channels').select('title').eq('username', name).single(),
         supabase.from('telegram_messages').select('*', { count: 'exact', head: true }).eq('username', name),
         supabase.from('telegram_messages').select(MSG_COLUMNS).eq('username', name).order('ts', { ascending: false }).limit(5),
@@ -165,7 +160,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
         status: r.status,
         ...(followed ? { followed_by_you: true } : { note: 'Log in (OAuth) to follow channels; the shared URL has no user.' }),
         posts_stored: count ?? 0,
-        latest_posts: await present((latest ?? []) as Msg[], 600),
+        latest_posts: await present((latest ?? []) as Msg[], 600, day),
       })
     },
   )
@@ -319,8 +314,8 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       title: '텔레그램 채널 글',
       description:
         'Recent posts from collected public Telegram channels, newest first, with a link to each post and the stocks ' +
-        'mentioned (matched by 종목명 or 종목코드). Filter by channel, by stock, and by time. Channels are refreshed ' +
-        'in the background if their last poll is more than 5 minutes old. Without a channel, shows the channels the user follows ' +
+        'mentioned (matched by 종목명 or 종목코드). Filter by channel, by stock, and by time. Channels are polled ' +
+        'every 5 minutes. Without a channel, shows the channels the user follows ' +
         '(get_my_channels), or every collected channel if they follow none or all_channels is true. Use ' +
         'add_telegram_channel to collect a new channel.',
       inputSchema: z.object({
@@ -336,38 +331,44 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     async ({ channel, all_channels, stock, since, limit, max_chars }) => {
       const name = channel ? channelName(channel) : null
       if (channel && !name) return json({ error: `Not a valid Telegram channel name: ${channel}` })
-      let scope: string[] | null = null // null = every channel
-      let scopeLabel: string
-      if (name) {
-        const { data } = await step('channel_exists', supabase.from('telegram_channels').select('username').eq('username', name))
-        if (!data?.length) return json({ error: `t.me/${name} isn't collected yet. Call add_telegram_channel first.` })
-        scope = [name]
-        scopeLabel = name
-      } else {
-        const mine = all_channels ? [] : await myChannels()
-        if (mine.length) {
-          scope = mine
-          scopeLabel = `your channels (${mine.length})`
-        } else {
-          scopeLabel = 'all collected channels'
-        }
-      }
-      // Answer from stored posts now (telegram-ingest keeps them within one cron interval) and refresh stale channels
-      // after the response, so the next read is fresh without this one waiting on Telegram.
-      if (scope) inBackground(refreshStale(scope))
+      // Answers from stored posts; telegram-ingest polls every channel every 5 minutes.
+      // Everything that doesn't depend on another query starts now: the trading day (for names), the user's channels,
+      // and the channel check.
+      const day = early(latestTradingDay(supabase))
+      const mineP = early(name || all_channels ? Promise.resolve([]) : myChannels())
+      const existsP = name
+        ? early(step('channel_exists', supabase.from('telegram_channels').select('username').eq('username', name)))
+        : null
 
       let code: string | null = null
       if (stock) {
-        code = await resolveStock(stock)
+        code = await resolveStock(stock, day)
         if (!code) return json({ error: `Unknown stock: ${stock}. Pass a 종목코드 or the exact 종목명 (see find_stock).` })
       }
 
-      let q = supabase.from('telegram_messages').select(MSG_COLUMNS).gte('ts', sinceIso(since, 3))
-      if (scope) q = q.in('username', scope)
-      if (code) q = q.contains('stock_codes', [code])
-      const { data, error } = await step('messages', q.order('ts', { ascending: false }).limit(limit))
-      if (error) throw new Error(error.message)
-      return json({ scope: scopeLabel, count: data?.length ?? 0, posts: await present((data ?? []) as Msg[], max_chars) })
+      const messages = (scope: string[] | null) => { // null = every channel
+        let q = supabase.from('telegram_messages').select(MSG_COLUMNS).gte('ts', sinceIso(since, 3))
+        if (scope) q = q.in('username', scope)
+        if (code) q = q.contains('stock_codes', [code])
+        return step('messages', q.order('ts', { ascending: false }).limit(limit))
+      }
+
+      let scopeLabel: string
+      let res: Awaited<ReturnType<typeof messages>>
+      if (name) {
+        // The posts are read alongside the check; a channel that isn't collected has none, and gets the error instead
+        const [exists, r] = await Promise.all([existsP!, messages([name])])
+        if (!exists.data?.length) return json({ error: `t.me/${name} isn't collected yet. Call add_telegram_channel first.` })
+        res = r
+        scopeLabel = name
+      } else {
+        const mine = await mineP
+        res = await messages(mine.length ? mine : null)
+        scopeLabel = mine.length ? `your channels (${mine.length})` : 'all collected channels'
+      }
+      if (res.error) throw new Error(res.error.message)
+      const data = res.data
+      return json({ scope: scopeLabel, count: data?.length ?? 0, posts: await present((data ?? []) as Msg[], max_chars, day) })
     },
   )
 
@@ -387,6 +388,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       annotations: { readOnlyHint: true },
     },
     async ({ query, channel, since, limit }) => {
+      const day = early(latestTradingDay(supabase)) // for 종목명, alongside the search
       const terms = query.trim().split(/\s+/).filter(Boolean).slice(0, 5)
       const name = channel ? channelName(channel) : null
       let q = supabase.from('telegram_messages').select(MSG_COLUMNS).gte('ts', sinceIso(since, 30))
@@ -401,7 +403,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
         const end = Math.min(m.text.length, i + terms[0].length + 250)
         return (start > 0 ? '…' : '') + m.text.slice(start, end) + (end < m.text.length ? '…' : '')
       }
-      return json({ query: terms, count: data?.length ?? 0, posts: await present((data ?? []) as Msg[], 0, snippet) })
+      return json({ query: terms, count: data?.length ?? 0, posts: await present((data ?? []) as Msg[], 0, day, snippet) })
     },
   )
 }
