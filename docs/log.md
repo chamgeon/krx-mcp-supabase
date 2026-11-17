@@ -321,6 +321,19 @@ What was done and why. Oldest first; new entries go at the bottom.
 - Deploy order: `supabase db push --remote` before `supabase functions deploy mcp`; otherwise the `tool_calls` insert
   fails on the unknown columns (logged to console only; tools keep working).
 
+## 2026-11-17 — Handshake answered where it lands
+- **Done:** the landing copy forwards only requests that may run a tool. It reads the JSON-RPC method from the body it
+  already buffers (`needsDbRegion` in `forward.ts`): `initialize`, `tools/list`, `ping` and `notifications/*` are
+  answered locally, and so are requests without a JSON-RPC call (GET/DELETE, OAuth metadata, a 401). Everything else,
+  `tools/call` or a method added later, is forwarded; a batch goes if any message needs it. **Why:** every request was
+  forwarded, so a session's start (`initialize`, `initialized`, `tools/list`) paid a hop of ~140–860 ms each before
+  the first tool call. The handler is stateless (`createMcpHandler`: a fresh server per request) and those methods
+  never touch the database, so answering them where they land changes nothing but the wait.
+- Locally answered responses carry `x-mcp-handled-in` like forwarded ones, to check where each request ran.
+- Trade-offs: the landing copy now verifies login tokens for those requests, fetching the JWKS once per instance
+  from across the ocean (then cached). The Mumbai instance's cold start moves from the handshake onto the first tool
+  call; the user waited through it before as well.
+
 ## Open
 - Watch the hourly user's real feed `timings` (`user_channels` ∥ `latest_trading_day`, no `bg_stale_check`); the
   benchmark can't show the per-user path.
@@ -328,6 +341,10 @@ What was done and why. Oldest first; new entries go at the bottom.
   KIS token change (`kis_token` should start at 0 and the quote right after `provisional_days`).
 - Keep-warm experiment: a cron call to `mcp` every few minutes, to keep the Mumbai copy and its connection alive
   (only the Mumbai side; Supabase doesn't promise the same copy serves the next request). Judge by real timings.
+- After deploying the handshake change: check that `initialize` is answered in the landing region and `tools/call` in
+  `ap-south-1` (`x-mcp-handled-in`), and that tool calls still log `forward_ms`.
+- Probe the slow first query on a new instance (DNS vs. TLS connect vs. first HTTP request to `/rest/v1`, after
+  different idle times) with a throwaway function, before any keep-warm work.
 - After deploying the hop columns: check `forward_ms` by `landed_in` against the benchmark (Seoul `overhead` ≈ 215 ms
   ≈ 2 × the one-way hop + both copies' overhead), then judge whether the hop pays off for Claude's regions.
 - Telegram background backfill with a status column, cron resume, and a "still collecting" note in feed/search (8-page

@@ -23,6 +23,33 @@ export function shouldForward(dbRegion: string | undefined, hereRegion: string |
   return hereRegion !== dbRegion
 }
 
+// MCP methods the landing copy answers itself. The handler is stateless (a fresh server per request) and these never
+// touch the database: they describe the server and its tools, from the same code deployed everywhere. So only the
+// requests that run a tool cross to DB_REGION, and a session's start (initialize, initialized, tools/list) doesn't
+// pay a hop per request. Anything not listed (tools/call, or a method added later) is forwarded.
+const LOCAL_METHODS = new Set(['initialize', 'ping', 'tools/list'])
+
+/**
+ * Whether a request body needs DB_REGION: true if any JSON-RPC message in it (a batch is an array) calls a method that
+ * isn't answered locally. No body (GET/DELETE), or a body that isn't JSON-RPC, can't run a tool, so it's answered where
+ * it landed, with the same error it would get anywhere.
+ */
+export function needsDbRegion(body: ArrayBuffer | undefined): boolean {
+  if (!body || body.byteLength === 0) return false
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(body))
+  } catch {
+    return false
+  }
+  const messages = Array.isArray(parsed) ? parsed : [parsed]
+  return messages.some((m) => {
+    const method = (m as { method?: unknown } | null)?.method
+    if (typeof method !== 'string') return false // a response or garbage, not a call
+    return !LOCAL_METHODS.has(method) && !method.startsWith('notifications/')
+  })
+}
+
 /** The same request against the public function URL: path below /mcp and the query string are kept. */
 export function forwardUrl(publicMcpUrl: string, requestUrl: string): string {
   const u = new URL(requestUrl)

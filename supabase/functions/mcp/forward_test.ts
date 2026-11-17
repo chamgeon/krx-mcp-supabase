@@ -5,6 +5,7 @@ import { assertEquals } from 'jsr:@std/assert@1'
 import {
   arrivalHeaders,
   hopFrom,
+  needsDbRegion,
   FORWARD_MS_HEADER,
   FORWARDED_HEADER,
   forwardHeaders,
@@ -100,4 +101,33 @@ Deno.test('hopFrom: what reaches the log', () => {
   assertEquals(hopFrom(arrivalHeaders(sent, 1_000_120)), { landedIn: 'us-east-1', forwardMs: 120 })
   assertEquals(hopFrom(arrivalHeaders(new Headers({ [FORWARD_MS_HEADER]: '5' }), 1_000_000)), { landedIn: null, forwardMs: null })
   assertEquals(hopFrom(undefined), { landedIn: null, forwardMs: null })
+})
+
+// ---- Which requests cross to the database region ----
+
+const body = (v: unknown) => new TextEncoder().encode(typeof v === 'string' ? v : JSON.stringify(v)).buffer as ArrayBuffer
+const rpc = (method: string, id: number | null = 1) => ({ jsonrpc: '2.0', ...(id == null ? {} : { id }), method })
+
+Deno.test('needsDbRegion: only tool calls (and unknown methods) are forwarded', () => {
+  // a session's start and the tool list are answered where the request landed
+  for (const m of ['initialize', 'tools/list', 'ping']) assertEquals(needsDbRegion(body(rpc(m))), false, m)
+  assertEquals(needsDbRegion(body(rpc('notifications/initialized', null))), false)
+  assertEquals(needsDbRegion(body(rpc('notifications/cancelled', null))), false)
+  // anything that may run a tool, or a method this list doesn't know yet, goes next to the database
+  assertEquals(needsDbRegion(body({ ...rpc('tools/call'), params: { name: 'get_daily_movers', arguments: {} } })), true)
+  assertEquals(needsDbRegion(body(rpc('resources/read'))), true)
+})
+
+Deno.test('needsDbRegion: a batch is forwarded if any message needs it', () => {
+  assertEquals(needsDbRegion(body([rpc('initialize'), rpc('tools/list', 2)])), false)
+  assertEquals(needsDbRegion(body([rpc('tools/list'), rpc('tools/call', 2)])), true)
+})
+
+Deno.test('needsDbRegion: no body or not JSON-RPC: answered locally (it cannot run a tool)', () => {
+  assertEquals(needsDbRegion(undefined), false) // GET / DELETE
+  assertEquals(needsDbRegion(new ArrayBuffer(0)), false)
+  assertEquals(needsDbRegion(body('not json')), false)
+  assertEquals(needsDbRegion(body('null')), false)
+  assertEquals(needsDbRegion(body({ jsonrpc: '2.0', id: 1, result: {} })), false) // a response, not a call
+  assertEquals(needsDbRegion(body({ method: 42 })), false)
 })

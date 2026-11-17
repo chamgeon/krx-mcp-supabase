@@ -31,6 +31,7 @@ import {
   forwardUrl,
   type Hop,
   hopFrom,
+  needsDbRegion,
   responseHeaders,
   shouldForward,
 } from './forward.ts'
@@ -718,15 +719,30 @@ function unauthorized(reason: string): Response {
 // Region of the database; requests landing elsewhere are forwarded there (forward.ts). Unset locally and in tests.
 const DB_REGION = Deno.env.get('DB_REGION') || undefined
 
+// Answers a request in this instance. The response says where (x-mcp-handled-in), as forwarded answers already do.
+async function handleHere(req: Request): Promise<Response> {
+  const res = await handle(req)
+  if (!HERE_REGION) return res
+  const headers = new Headers(res.headers)
+  headers.set('x-mcp-handled-in', HERE_REGION)
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
+}
+
 Deno.serve(async (req) => {
   const arrivedAt = Date.now()
   if (!shouldForward(DB_REGION, HERE_REGION ?? undefined, req.headers)) {
     // Handled here: record the hop from the landing copy if this was forwarded (forward_ms in tool_calls)
-    return handle(new Request(req, { headers: arrivalHeaders(req.headers, arrivedAt) }))
+    return handleHere(new Request(req, { headers: arrivalHeaders(req.headers, arrivedAt) }))
   }
 
   // Buffered (MCP requests are small JSON), so the same body can still be handled here if forwarding fails
   const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer()
+  const here = () => new Request(req.url, { method: req.method, headers: arrivalHeaders(req.headers, arrivedAt), body })
+
+  // Only tool calls need the database. The handshake, the tool list, notifications and non-MCP requests (OAuth
+  // metadata, a 401) are answered here, saving a hop each (forward.ts, needsDbRegion).
+  if (!needsDbRegion(body)) return handleHere(here())
+
   try {
     const res = await fetch(forwardUrl(MCP_URL, req.url), {
       method: req.method,
@@ -742,7 +758,7 @@ Deno.serve(async (req) => {
   } catch (e) {
     // Slow (every query crosses regions) but working beats failing
     console.error('forward to', DB_REGION, 'failed, handling here:', (e as Error).message)
-    return handle(new Request(req.url, { method: req.method, headers: arrivalHeaders(req.headers, arrivedAt), body }))
+    return handleHere(here())
   }
 })
 
