@@ -4,6 +4,8 @@
 import { assertEquals } from 'jsr:@std/assert@1'
 import {
   arrivalHeaders,
+  CLIENT_HEADER,
+  clientOf,
   hopFrom,
   needsDbRegion,
   FORWARD_MS_HEADER,
@@ -130,4 +132,21 @@ Deno.test('needsDbRegion: no body or not JSON-RPC: answered locally (it cannot r
   assertEquals(needsDbRegion(body('null')), false)
   assertEquals(needsDbRegion(body({ jsonrpc: '2.0', id: 1, result: {} })), false) // a response, not a call
   assertEquals(needsDbRegion(body({ method: 42 })), false)
+})
+
+// ---- The client (User-Agent) logged for a forwarded request ----
+
+Deno.test('client: a forwarded request logs the User-Agent the landing copy saw', () => {
+  const sent = forwardHeaders(new Headers({ 'user-agent': 'Claude-User' }), 'ap-south-1', 'us-east-1', 1_000_000)
+  assertEquals(sent.get(CLIENT_HEADER), 'Claude-User')
+  // the runtime appends its own to the forwarded request's User-Agent
+  sent.set('user-agent', 'Claude-User (variant; SupabaseEdgeRuntime/1.79.1; ref=abc)')
+  assertEquals(clientOf(arrivalHeaders(sent, 1_000_100)), 'Claude-User')
+})
+
+Deno.test('client: a direct request logs its own User-Agent; a caller-sent client header is dropped', () => {
+  const direct = new Headers({ 'user-agent': 'openai-mcp/1.0.0', [CLIENT_HEADER]: 'fake' })
+  assertEquals(clientOf(arrivalHeaders(direct, 1_000_000)), 'openai-mcp/1.0.0')
+  assertEquals(clientOf(arrivalHeaders(new Headers(), 1_000_000)), null)
+  assertEquals(clientOf(undefined), null)
 })

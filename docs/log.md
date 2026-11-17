@@ -361,21 +361,41 @@ What was done and why. Oldest first; new entries go at the bottom.
 - Sparse baseline (5 calls, 120 s apart, landing in `us-east-1`): 4 of 5 slow (first query 443–561 ms, `fwd`
   580–1,001 ms); one fast (96 ms, 113 ms), on a worker that survived 120 s idle.
 
+## 2026-11-17 — Real calls confirm the query changes
+- Feed (11:48, 12:00, 12:26, 13:47, 14:48, 15:49): `user_channels` and `latest_trading_day` start together, no
+  `bg_stale_check`; on a new worker either one can be the slower and set the pace.
+- `analyze_stock` in session (12:26): `kis_token` starts at 0 and the KIS quote right after it; off session (16:04):
+  `history` and `provisional_days` start together, no KIS call. Off-session warm (benchmark, 16:10, 5 calls): tool
+  p50 85 ms (`provisional_days` 75 ∥ `history` 84), no gain over 11-16's ~78 ms in sequence, because `history` alone
+  was 84 ms against ~43 then. Cause unknown (5 calls, right after the 16:00 ingest rewrite); not pursued.
+
+## 2026-11-17 — Cold calls accepted for now; CI
+- **Decided:** accept the cold-call cost (~0.8–1 s more when the workers are new: start-up plus opening connections,
+  mostly in Mumbai) and drop the keep-warm and region-move work. **Why:** usage is one scheduled routine and a few
+  live sessions, and Claude spends several seconds generating each answer anyway. Revisit if users find it slow:
+  the options are a keep-warm ping (test with the sparse benchmark run) or moving the project to `us-east-1`.
+- Dropped from Open with it: why `kis-ingest`'s previous-day lookup averages ~1 s in `pg_stat_statements` (may still
+  include the pre-11-13 view) and whether ingest runs slow real calls (one sample: first queries 1.5–2 s at 16:04
+  during the 16:00 run, 518–726 ms at 16:09 without).
+- **Done:** CI (`.github/workflows/test.yml`): `deno task check` (typecheck of every function and script, including
+  the `index.ts` files no unit test imports) and `deno task test` on every push and pull request, Deno pinned to
+  2.9.8. No secrets; the fixture tests are skipped there (66 pass, 28 skipped in a fresh clone). The DB and MCP suites
+  still need the local stack.
+
+## 2026-11-17 — `tool_calls.client` restored for forwarded calls
+- **Done:** since region forwarding (11-16 16:18) the runtime appended its own User-Agent to the forwarded request
+  (`Claude-User (variant; SupabaseEdgeRuntime/1.79.1; ref=<project ref>)`), so one client was logged under two names,
+  with the project ref in every row. The landing copy now carries the caller's User-Agent in `x-mcp-client` (dropped
+  from direct requests, like the other forward headers) and the handling copy logs that. Migration
+  `20261117000003` restores the 57 affected rows to `Claude-User`. The benchmark exclusion (`krx-bench/` prefix) was
+  never affected.
+
 ## Open
-- Watch the hourly user's real feed `timings` (`user_channels` ∥ `latest_trading_day`, no `bg_stale_check`); the
-  benchmark can't show the per-user path.
-- Benchmark `analyze_stock` after the close, for the off-session gain (expected ~77 → ~55 ms), and in session for the
-  KIS token change (`kis_token` should start at 0 and the quote right after `provisional_days`).
-- Cold calls cost ~0.8–1 s more than warm ones (new worker start-up + opening connections, mostly in Mumbai). Options,
-  undecided: accept it while usage is small; a keep-warm ping (test with a sparse benchmark run against the
-  baseline above); or move the project to `us-east-1`, where Claude's calls land (no forward; a new project and data
-  migration).
 - Telegram background backfill with a status column, cron resume, and a "still collecting" note in feed/search (8-page
   cap kept).
 - Alert on ingest failures (e.g. a Telegram message): refusals only show in function logs and `last_error` now.
 - Run the `screen_stocks` vs. `analyze()` comparison on a copy of production data (all ~2,800 stocks) to find
   disagreements the seed can't show.
-- CI: run `deno task test` on every push.
 - Telegram tagging matches only 6-digit codes, so the 96 alphanumeric 종목코드 can be tagged by name only.
 - Check what `supabase config push` targets under CLI v3 before the next run (README setup).
 - Optional: a `user_activity` view (signup, first/last call, calls per user) for checking usage without hand-written SQL.

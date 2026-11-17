@@ -486,6 +486,7 @@ test('forwarded calls log the hop (landed_in, forward_ms); direct calls log none
     'x-mcp-forwarded': '1',
     'x-mcp-landed-at': String(Date.now() - 150),
     'x-mcp-landed-in': 'test-landing-region',
+    'x-mcp-client': 'Claude-User', // the User-Agent the landing copy saw
     'x-mcp-forward-ms': '1', // a caller's own value must be ignored
   })
   try {
@@ -497,17 +498,22 @@ test('forwarded calls log the hop (landed_in, forward_ms); direct calls log none
   assertEquals(row.landed_in, 'test-landing-region')
   assert(row.forward_ms >= 150 && row.forward_ms < 30_000, `forward_ms ${row.forward_ms}`)
   assertEquals(row.handled_in, null) // SB_REGION is unset locally
+  assertEquals(row.client, 'Claude-User') // not this request's own User-Agent, which the runtime would have altered
 
   // A direct call can't put values in the log
   const direct = `hop-${crypto.randomUUID()}`
-  const spoof = await connect({ key: KEY }, undefined, { 'x-mcp-forward-ms': '5', 'x-mcp-landed-in': 'fake' })
+  const spoof = await connect({ key: KEY }, 'krx-mcp-tests/direct', {
+    'x-mcp-forward-ms': '5',
+    'x-mcp-landed-in': 'fake',
+    'x-mcp-client': 'fake',
+  })
   try {
     await call('find_stock', { name: direct }, spoof)
   } finally {
     await spoof.close()
   }
   const d = await waitForLog((q) => q.eq('tool', 'find_stock').eq('args->>name', direct))
-  assertEquals([d.landed_in, d.forward_ms], [null, null])
+  assertEquals([d.landed_in, d.forward_ms, d.client], [null, null, 'krx-mcp-tests/direct'])
 })
 
 // Close the shared client last so its stream doesn't outlive the tests

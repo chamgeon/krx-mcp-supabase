@@ -13,6 +13,9 @@ export const FORWARDED_HEADER = 'x-mcp-forwarded'
 // FORWARD_MS_HEADER is set only by this function on arrival; a value sent by a caller is always dropped.
 export const LANDED_AT_HEADER = 'x-mcp-landed-at'
 export const LANDED_IN_HEADER = 'x-mcp-landed-in'
+// The caller's User-Agent, carried along: the runtime appends its own to the forwarded request's User-Agent
+// ("Claude-User (variant; SupabaseEdgeRuntime/…; ref=…)"), so the handling copy would log a different client.
+export const CLIENT_HEADER = 'x-mcp-client'
 export const FORWARD_MS_HEADER = 'x-mcp-forward-ms'
 const MAX_FORWARD_MS = 60_000 // anything outside ±this is a bad stamp or clock, not a hop
 
@@ -70,6 +73,9 @@ export function forwardHeaders(headers: Headers, dbRegion: string, landedIn: str
   h.set(LANDED_AT_HEADER, String(landedAt))
   if (landedIn) h.set(LANDED_IN_HEADER, landedIn)
   else h.delete(LANDED_IN_HEADER)
+  const client = headers.get('user-agent')
+  if (client) h.set(CLIENT_HEADER, client)
+  else h.delete(CLIENT_HEADER)
   return h
 }
 
@@ -86,9 +92,12 @@ export function arrivalHeaders(headers: Headers, arrivedAt: number): Headers {
     h.set(FORWARD_MS_HEADER, String(Math.round(ms)))
     const landedIn = h.get(LANDED_IN_HEADER)
     if (landedIn) h.set(LANDED_IN_HEADER, landedIn.slice(0, 40))
+    const client = h.get(CLIENT_HEADER)
+    if (client) h.set(CLIENT_HEADER, client.slice(0, 200))
   } else {
     h.delete(LANDED_AT_HEADER)
     h.delete(LANDED_IN_HEADER)
+    h.delete(CLIENT_HEADER)
   }
   return h
 }
@@ -110,4 +119,12 @@ export function responseHeaders(headers: Headers, handledIn: string | null): Hea
   for (const k of ['content-encoding', 'content-length', 'transfer-encoding', 'connection']) h.delete(k)
   if (handledIn) h.set('x-mcp-handled-in', handledIn)
   return h
+}
+
+/**
+ * The client to log (its User-Agent), from headers that went through arrivalHeaders: the one the landing copy saw for
+ * a forwarded request, else the request's own User-Agent.
+ */
+export function clientOf(headers: Headers | undefined): string | null {
+  return headers?.get(CLIENT_HEADER) ?? headers?.get('user-agent') ?? null
 }

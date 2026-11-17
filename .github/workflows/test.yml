@@ -1,0 +1,30 @@
+# Unit tests and a typecheck on every push and pull request. No secrets and no Docker: `deno task test` runs the unit
+# tests next to the code (the ones that need the gitignored real-data fixtures are skipped), and `deno task check`
+# typechecks every function and script, including the code no unit test imports (the functions' index.ts).
+# The DB and MCP suites need the local Supabase stack and are run by hand (README → Tests).
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          # Pinned to the version used locally, so CI and local runs agree. Bump deliberately.
+          deno-version: 2.9.8
+
+      - name: Typecheck
+        run: deno task check
+
+      - name: Unit tests
+        run: deno task test

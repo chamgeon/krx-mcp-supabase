@@ -218,6 +218,9 @@ Three suites, from fastest to most complete. None of them touch production, KIS,
 | `deno task test:db` | `screen_stocks`, the `prices` / `available_dates` views, the `trading_days` triggers, and `screen_stocks` vs. `analyze()` agreement (`supabase/tests/db_test.ts`) | local stack |
 | `deno task test:mcp` | Every MCP tool over HTTP with the official MCP client, auth (401, `?key=`, a real user token), usage logging (`supabase/tests/mcp_test.ts`) | local stack + served function |
 
+CI (`.github/workflows/test.yml`) runs `deno task check` (typecheck of every function and script) and `deno task test`
+on every push and pull request.
+
 ```sh
 open -a Docker                  # Docker Desktop runs the local stack
 supabase start                  # local Postgres/Auth/Edge runtime; applies migrations and supabase/seed.sql

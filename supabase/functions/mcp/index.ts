@@ -27,6 +27,7 @@ import { registerTelegramTools } from './telegram.ts'
 import { early, type Step, step, timeCall } from './timing.ts'
 import {
   arrivalHeaders,
+  clientOf,
   forwardHeaders,
   forwardUrl,
   type Hop,
@@ -260,7 +261,8 @@ const handler = createMcpHandler((ctx) => {
   const caller: Caller = {
     userId: (ctx.authInfo?.extra?.userId as string | undefined) ?? null,
     auth: ctx.authInfo?.extra?.userId ? 'oauth' : 'shared_key',
-    client: ctx.requestInfo?.headers.get('user-agent') ?? null,
+    // The caller's User-Agent; for a forwarded request, as the landing copy saw it (forward.ts, clientOf)
+    client: clientOf(ctx.requestInfo?.headers),
     // Set by Deno.serve below (arrivalHeaders), never taken from the caller as sent
     hop: hopFrom(ctx.requestInfo?.headers),
   }
