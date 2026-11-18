@@ -566,6 +566,34 @@ What was done and why. Oldest first; new entries go at the bottom.
   insidertracking + all of today's posts of the other four (5, 2, 1, 1). An explicit `since` spreads the slots over
   the whole period instead, so a week-long question isn't mostly today.
 
+## 2026-11-18 — kis-ingest: calls in parallel, run in Seoul
+- **Done:** the 93 multprice calls run 5 at a time under 10 starts per second (`kis-ingest/pool.ts`), instead of one
+  after another with a 100 ms pause. **Why:** a run took 93 × KIS's response time, so ~1.1 s calls made it ~115 s, and
+  two runs hit the 150 s limit. Now bounded by the cap (~9.3 s) or by 93 × latency / 5 (~20 s at 1.1 s). 10/s is half
+  of KIS's 20/s per-app-key limit, which `analyze_stock`'s live quotes share; a rate-limited call still backs off
+  1 s and retries (`kisGet`). `timings` adds `kis_wall_ms` (the phase's wall time; `kis_ms` is now the calls added
+  up) and `ran_in`.
+- **Done:** the kis-ingest cron jobs send `x-region: ap-northeast-2` (`sql/cron.example.sql`), so the function runs in
+  Seoul next to KIS instead of Mumbai next to the database: 93 KIS round trips become local, and the few database
+  calls (token, latest day, stock list, 3 upserts of ≤ 1,000 rows) cross instead. **Why:** a normal call was ~0.16 s
+  from Mumbai; whether 11-18's ~1 s calls were KIS's servers or the path, Seoul removes the path. Unverified until it
+  runs: whether Supabase honors `x-region` on requests from pg_net (`ran_in` will tell).
+
+## 2026-11-18 — First cold benchmark
+- Three `bench:cold` runs (one tool each, 5 calls 150 s apart, landing in us-east-1, from Seoul): find_stock,
+  check_available_dates, get_daily_movers. One call dropped (a real call 58 s before it). Numbers in requirements
+  §2.3.
+- Cold end-to-end p50 is 2.4–2.9 s against ~0.3 s warm (11-17): the cold penalty is +2.1–2.6 s per call. Of it,
+  server `tool` ~0.5–0.6 s (warm ~0.08 s: the new worker's first database connections) and `fwd` ~0.7–1.0 s (warm
+  ~0.1 s: the Mumbai worker starting). The rest (total − tool − fwd at p50: ~1.0–1.7 s against ~0.1 s warm) is
+  outside what the server measures: the us-east-1 worker starting, plus new connections from the benchmark machine
+  after 150 s idle (the last part isn't what Claude's servers pay).
+- Server-side targets hold (PERF-9: tool p95 572–770 ms); end to end, 2 of 3 tools are over the 3 s p95 (PERF-7),
+  and the cold penalty is over its 1.5 s target for all three (PERF-11). The worst samples (check_available_dates
+  4.7 s, fwd 3.2 s) were at 12:00 KST, during the gateway slowdown.
+- This is the cost parked on 11-17 ("Cold calls accepted for now"). The options stand: a keep-warm ping, or moving
+  the project to us-east-1 (removes the forward hop and puts the database next to Claude's calls).
+
 ## Open
 - Telegram tagging matches only 6-digit codes, so the 96 alphanumeric 종목코드 can be tagged by name only.
 - After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,
@@ -580,7 +608,7 @@ What was done and why. Oldest first; new entries go at the bottom.
   end-to-end p95 of 1.7 s, worse than the 20h/50-post case. Probably the query plan for a small `since`.
 - `tool_calls` has no retention (CAP-4): add a cleanup next to `pipeline-report`'s 90-day delete of `ingest_runs`.
 - The KIS vs KRX check has no threshold (CORR-1): the report lists mismatches but doesn't flag more than 0.5%.
-- Cold latency is unmeasured (PERF-7, PERF-9–11): run `deno task bench:cold` and fill in requirements.md §2.3.
-- KIS slowdown (11-18): the KIS calls themselves got slow (see 11-18 "Feed shared across channels"). Options: a few
-  requests in flight at once under a calls-per-second cap (the 20/s limit is per app key, shared with
-  `analyze_stock`'s quotes), so 93 calls of ~1 s take ~25 s instead of ~100 s.
+- Cold latency for the other 7 cases (requirements §2.3): `deno task bench:cold` without `--only` (~2 h), outside
+  busy hours.
+- After deploying kis-ingest's pool and moving its cron jobs to Seoul: check `summary->'timings'` (`ran_in` should be
+  `ap-northeast-2`; `kis_wall_ms`, `kis_ms / kis_calls` per call, `rate_limited`) against 11-18's 72–103 s.

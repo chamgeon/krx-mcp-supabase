@@ -130,19 +130,20 @@ the busy hours (12, 15–16 and 19 KST in `tool_calls`), e.g. before 07:00 or 20
 
 | ID | P | Requirement | Baseline | Status |
 |---|---|---|---|---|
-| PERF-7 | M | Cold end-to-end p95: Tier A ≤ 3,000 ms, Tier B ≤ 4,000 ms | only warm-up calls so far: 296–2,077 ms (n=1 per tool, 11-17) | ❔ |
-| PERF-9 | S | Cold server latency p95: Tier A ≤ 1,500 ms, Tier B ≤ 2,500 ms | production `latency_ms` (mixed cold/warm): A 387–1,504, B 1,881 | ❔ |
-| PERF-10 | S | Cold forward hop p95 ≤ 1,500 ms (includes the DB-region worker's start-up) | | ❔ |
-| PERF-11 | C | Cold penalty (cold p50 − warm p50, end-to-end) ≤ 1,500 ms per tool | | ❔ |
+| PERF-7 | M | Cold end-to-end p95: Tier A ≤ 3,000 ms, Tier B ≤ 4,000 ms | 11-18, 3 Tier A tools, n=4–5: find_stock 2,981, check_available_dates **4,718**, get_daily_movers **4,000** | ⚠️ 2 of 3 over |
+| PERF-9 | S | Cold server latency p95: Tier A ≤ 1,500 ms, Tier B ≤ 2,500 ms | 11-18: find_stock 686, check_available_dates 770, get_daily_movers 572 | ✅ (Tier B unmeasured) |
+| PERF-10 | S | Cold forward hop p95 ≤ 1,500 ms (includes the DB-region worker's start-up) | 11-18: 1,067 / **3,229** / 1,061 (the 3,229 call was at 12:00 KST, during the gateway slowdown) | ⚠️ |
+| PERF-11 | C | Cold penalty (cold p50 − warm p50, end-to-end) ≤ 1,500 ms per tool | 11-18 cold vs 11-17 warm p50: find_stock +2,100, check_available_dates +2,590, get_daily_movers +2,644 | ❌ |
 
-Results (fill in from `bench-results/`):
+Results (fill in from `bench-results/`). `total` is measured from the benchmark machine in Korea to us-east-1, so it
+includes that trip; `tool` and `fwd` match real calls from Claude:
 
 | Tool | Tier | Run (kept / dropped) | total p50 / p95 | tool p50 / p95 | fwd p50 / p95 |
 |---|---|---|---|---|---|
-| find_stock | A | | | | |
-| check_available_dates | A | | | | |
+| find_stock | A | 20261118T023156Z (5 / 0) | 2,386 / 2,981 | 631 / 686 | 779 / 1,067 |
+| check_available_dates | A | 20261118T025820Z (4 / 1) | 2,881 / 4,718 | 568 / 770 | 969 / 3,229 |
 | get_stock_history (20d) | A | | | | |
-| get_daily_movers (latest) | A | | | | |
+| get_daily_movers (latest) | A | 20261118T032359Z (5 / 0) | 2,941 / 4,000 | 513 / 572 | 715 / 1,061 |
 | get_telegram_feed (1h, 30) | A | | | | |
 | search_telegram (60h, 10) | A | | | | |
 | list_telegram_channels | A | | | | |

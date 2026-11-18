@@ -29,7 +29,8 @@ select cron.schedule(
   $$
   select net.http_post(
     url := 'https://<PROJECT_REF>.supabase.co/functions/v1/kis-ingest',
-    headers := jsonb_build_object('Content-Type', 'application/json', 'x-ingest-secret', '<INGEST_SECRET>'),
+    -- x-region: run in Seoul, next to the KIS API (93 calls a run), not next to the database (a few calls)
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-region', 'ap-northeast-2', 'x-ingest-secret', '<INGEST_SECRET>'),
     body := '{}'::jsonb,
     timeout_milliseconds := 150000
   )
@@ -43,7 +44,8 @@ select cron.schedule(
   $$
   select net.http_post(
     url := 'https://<PROJECT_REF>.supabase.co/functions/v1/kis-ingest',
-    headers := jsonb_build_object('Content-Type', 'application/json', 'x-ingest-secret', '<INGEST_SECRET>'),
+    -- x-region: run in Seoul, next to the KIS API (93 calls a run), not next to the database (a few calls)
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-region', 'ap-northeast-2', 'x-ingest-secret', '<INGEST_SECRET>'),
     body := '{}'::jsonb,
     timeout_milliseconds := 150000
   );
@@ -56,7 +58,8 @@ select cron.schedule(
   $$
   select net.http_post(
     url := 'https://<PROJECT_REF>.supabase.co/functions/v1/kis-ingest',
-    headers := jsonb_build_object('Content-Type', 'application/json', 'x-ingest-secret', '<INGEST_SECRET>'),
+    -- x-region: run in Seoul, next to the KIS API (93 calls a run), not next to the database (a few calls)
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-region', 'ap-northeast-2', 'x-ingest-secret', '<INGEST_SECRET>'),
     body := '{}'::jsonb,
     timeout_milliseconds := 150000
   );
