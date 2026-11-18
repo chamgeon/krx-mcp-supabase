@@ -13,14 +13,43 @@
 // KIS has no whole-market endpoint, so the stock list comes from the latest stored day, and the
 // fields KIS doesn't return (market, 소속부, 상장주식수) are carried forward from it.
 // 시가총액 = 종가 × carried-forward 상장주식수, which is how KRX computes it.
+//
+// The answer carries `timings` (where the run's time went: KIS calls, rate-limit waits, the database write), and the
+// same numbers are saved into the running ingest_runs row as the run goes (run.progress), so a run stopped at the
+// 150 s limit still shows which phase it was in.
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { kisGet, kisToken } from '../_shared/kis.ts'
 import { kisSnapshotProblems, parseKisRows, type Prev } from './parse.ts'
-import { monitored } from '../_shared/ops.ts'
+import { monitored, type RunContext } from '../_shared/ops.ts'
 
 const MULTI_MAX = 30 // intstock-multprice: up to 30 stocks per call
+const PROGRESS_EVERY = 25 // KIS calls between progress saves (~4 per run)
+
+// Where a run's time goes (ms), for the answer and the running row's progress
+type Timings = {
+  phase: string
+  token_ms?: number
+  latest_day_ms?: number
+  stock_list_ms?: number
+  stocks?: number
+  kis_calls: number
+  kis_ms: number // the multprice calls, rate-limit waits included
+  kis_slowest_ms: number
+  rate_limited: number // EGW00201 answers (each waits 1 s and retries)
+  rate_limit_wait_ms: number
+  upsert_ms?: number
+}
+
+async function timed<T>(t: Timings, key: 'token_ms' | 'latest_day_ms' | 'stock_list_ms' | 'upsert_ms', work: Promise<T>): Promise<T> {
+  const t0 = performance.now()
+  try {
+    return await work
+  } finally {
+    t[key] = Math.round(performance.now() - t0)
+  }
+}
 
 const INGEST_SECRET = Deno.env.get('INGEST_SECRET')!
 const supabase = createClient(
@@ -75,34 +104,59 @@ async function stocksOf(dayIso: string): Promise<Prev[]> {
   }
 }
 
-async function snapshot(token: string, todayIso: string, asOf: string, prev: Prev[]): Promise<number> {
+async function snapshot(
+  token: string,
+  todayIso: string,
+  asOf: string,
+  prev: Prev[],
+  t: Timings,
+  run: RunContext,
+): Promise<number> {
   const byCode = new Map(prev.map((p) => [p.isu_cd, p]))
   const rows: ReturnType<typeof parseKisRows> = []
+  const onRateLimited = async (wait: Promise<void>) => {
+    const w0 = performance.now()
+    t.rate_limited++
+    await wait
+    t.rate_limit_wait_ms += Math.round(performance.now() - w0)
+  }
+  t.phase = 'kis_calls'
   for (let i = 0; i < prev.length; i += MULTI_MAX) {
     const params: Record<string, string> = {}
     prev.slice(i, i + MULTI_MAX).forEach((p, j) => {
       params[`FID_COND_MRKT_DIV_CODE_${j + 1}`] = 'J'
       params[`FID_INPUT_ISCD_${j + 1}`] = p.isu_cd
     })
-    const body = await kisGet(token, '/uapi/domestic-stock/v1/quotations/intstock-multprice', 'FHKST11300006', params)
+    const c0 = performance.now()
+    const body = await kisGet(token, '/uapi/domestic-stock/v1/quotations/intstock-multprice', 'FHKST11300006', params, { onRateLimited })
+    const ms = Math.round(performance.now() - c0)
+    t.kis_calls++
+    t.kis_ms += ms
+    t.kis_slowest_ms = Math.max(t.kis_slowest_ms, ms)
     rows.push(...parseKisRows(body.output, byCode, todayIso, asOf))
+    if (t.kis_calls % PROGRESS_EVERY === 0) await run.progress(t)
     await sleep(100) // stay well under KIS's 20 calls/s
   }
   // Refuse a snapshot that looks wrong (renamed fields, most stocks missing): the previous snapshot stays, with its
   // older as_of, and the run fails with the reason
   const problems = kisSnapshotProblems(rows, prev.length)
   if (problems.length) throw new Error(`refused snapshot: ${problems.join('; ')}`)
-  for (let i = 0; i < rows.length; i += 1000) {
-    const { error } = await supabase
-      .from('live_prices')
-      .upsert(rows.slice(i, i + 1000), { onConflict: 'bas_dd,isu_cd' })
-    if (error) throw new Error(`upsert ${todayIso}: ${error.message}`)
-  }
+  t.phase = 'upsert'
+  await run.progress(t)
+  await timed(t, 'upsert_ms', (async () => {
+    for (let i = 0; i < rows.length; i += 1000) {
+      const { error } = await supabase
+        .from('live_prices')
+        .upsert(rows.slice(i, i + 1000), { onConflict: 'bas_dd,isu_cd' })
+      if (error) throw new Error(`upsert ${todayIso}: ${error.message}`)
+    }
+  })())
+  t.phase = 'done'
   return rows.length
 }
 
 // Every run is recorded in ingest_runs, and a failure alerts the operator on Telegram (../_shared/ops.ts)
-Deno.serve(monitored('kis-ingest', supabase, async (req) => {
+Deno.serve(monitored('kis-ingest', supabase, async (req, run) => {
   if (req.headers.get('x-ingest-secret') !== INGEST_SECRET) {
     return new Response('unauthorized', { status: 401 })
   }
@@ -110,9 +164,12 @@ Deno.serve(monitored('kis-ingest', supabase, async (req) => {
   const asOf = new Date().toISOString()
   const today = todayKst()
   const todayIso = toIsoDate(today)
+  const t: Timings = { phase: 'start', kis_calls: 0, kis_ms: 0, kis_slowest_ms: 0, rate_limited: 0, rate_limit_wait_ms: 0 }
   try {
-    const token = await kisToken(supabase)
-    const latest = await latestTradingDay(token)
+    t.phase = 'token'
+    const token = await timed(t, 'token_ms', kisToken(supabase))
+    t.phase = 'latest_day'
+    const latest = await timed(t, 'latest_day_ms', latestTradingDay(token))
     if (latest !== today) {
       return Response.json({ date: today, skipped: `not a trading day (latest is ${latest})` })
     }
@@ -120,12 +177,15 @@ Deno.serve(monitored('kis-ingest', supabase, async (req) => {
     const { data: cur } = await supabase.from('available_dates').select('final').eq('bas_dd', todayIso)
     if (cur?.[0]?.final) return Response.json({ date: today, skipped: 'KRX data already loaded' })
 
+    t.phase = 'stock_list'
     const prev = await previousDay(todayIso)
     if (!prev) throw new Error('no earlier day to take the stock list from')
-    const stocks = await stocksOf(prev)
-    const count = await snapshot(token, todayIso, asOf, stocks)
-    return Response.json({ date: today, as_of: asOf, stock_list_from: prev, rows: count })
+    const stocks = await timed(t, 'stock_list_ms', stocksOf(prev))
+    t.stocks = stocks.length
+    await run.progress(t)
+    const count = await snapshot(token, todayIso, asOf, stocks, t, run)
+    return Response.json({ date: today, as_of: asOf, stock_list_from: prev, rows: count, timings: t })
   } catch (e) {
-    return Response.json({ date: today, error: (e as Error).message }, { status: 500 })
+    return Response.json({ date: today, error: (e as Error).message, timings: t }, { status: 500 })
   }
 }))

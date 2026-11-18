@@ -6,7 +6,7 @@ import { kstTime } from '../_shared/ops.ts'
 export type Run = {
   job: string
   started_at: string
-  ok: boolean
+  ok: boolean | null // null: still running (or stopped and not yet marked; ops.ts sweepKilled marks it within minutes)
   // the function's answer: kis-ingest { date, rows, as_of } | { date, skipped }; krx-ingest { results };
   // telegram-ingest { polled, new_posts }
   // deno-lint-ignore no-explicit-any
@@ -112,7 +112,7 @@ export function buildReport({ end, runs, pendingKrxDays, krxLatest, channelError
   }
 
   // Failed runs, per job
-  const failed = runs.filter((r) => !r.ok)
+  const failed = runs.filter((r) => r.ok === false) // includes runs stopped at the time limit (ops.ts)
   if (!failed.length) {
     lines.push('✅ No failed runs since yesterday 18:00')
   } else {

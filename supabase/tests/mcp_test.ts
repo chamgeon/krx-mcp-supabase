@@ -334,6 +334,55 @@ test('search_telegram: every word must match', async () => {
   assertStringIncludes(both.posts[0].text, 'HBM')
 })
 
+// Extra posts for the fairness tests (msg_id 1000+), removed afterwards
+async function withExtraPosts(rows: { username: string; msg_id: number; ts: string }[], fn: () => Promise<void>) {
+  const { error } = await admin.from('telegram_messages').insert(rows.map((r) => ({ ...r, text: `extra ${r.msg_id}` })))
+  if (error) throw new Error(error.message)
+  try {
+    await fn()
+  } finally {
+    await admin.from('telegram_messages').delete().gte('msg_id', 1000)
+  }
+}
+
+test('get_telegram_feed: slots are shared across channels, so a busy one cannot crowd out the rest', async () => {
+  const busy = [1, 2, 3, 4, 5].map((i) => ({ username: 'testchannel_a', msg_id: 1000 + i, ts: `2026-11-14T0${i}:00:00Z` }))
+  await withExtraPosts(busy, async () => {
+    const r = await call('get_telegram_feed', { all_channels: true, since: '2026-11-01', limit: 3 })
+    // newest of each channel first (a/1005, b/1), then a's next; shown newest first
+    assertEquals(r.posts.map((p: Json) => p.link), [
+      'https://t.me/testchannel_a/1005', 'https://t.me/testchannel_a/1004', 'https://t.me/testchannel_b/1',
+    ])
+    assertEquals(r.channels.map((c: Json) => [c.channel, c.shown, c.in_window]), [['testchannel_a', 2, 7], ['testchannel_b', 1, 1]])
+    assertStringIncludes(r.channels_note, 'testchannel_a has more posts')
+
+    // One channel: just its newest posts, no note
+    const one = await call('get_telegram_feed', { channel: 'testchannel_a', since: '2026-11-01', limit: 3 })
+    assertEquals(one.posts.map((p: Json) => p.link.split('/').pop()), ['1005', '1004', '1003'])
+    assertEquals(one.channels_note, undefined)
+  })
+})
+
+test("get_telegram_feed: the default window shares today's posts first", async () => {
+  // seconds ago, so "today" holds except in the first seconds after midnight KST
+  const ago = (s: number) => new Date(Date.now() - s * 1000).toISOString()
+  const today = [1, 2, 3, 4].map((i) => ({ username: 'testchannel_a', msg_id: 1010 + i, ts: ago(i) }))
+  const yesterday = [{ username: 'testchannel_b', msg_id: 1020, ts: ago(25 * 3600) }] // before midnight KST, in 3 days
+  await withExtraPosts([...today, ...yesterday], async () => {
+    const r = await call('get_telegram_feed', { all_channels: true, limit: 3 })
+    assertEquals(r.posts.map((p: Json) => p.link.split('/').pop()), ['1011', '1012', '1013'])
+    assertEquals(r.channels.map((c: Json) => [c.channel, c.shown, c.shown_today, c.today, c.in_window]), [['testchannel_a', 3, 3, 4, 4]])
+
+    // A slot left after today's posts goes to earlier days
+    const more = await call('get_telegram_feed', { all_channels: true, limit: 5 })
+    assertEquals(more.posts.map((p: Json) => p.link.split('/').pop()), ['1011', '1012', '1013', '1014', '1020'])
+
+    // An explicit since spreads the slots over the whole period instead
+    const spread = await call('get_telegram_feed', { all_channels: true, since: ago(3 * 86400), limit: 3 })
+    assertEquals(spread.posts.map((p: Json) => p.link.split('/').pop()), ['1011', '1012', '1020'])
+  })
+})
+
 test('feed and search say when a channel is still filling, only if the window needs older posts', async () => {
   // testchannel_b as if just added: posts from 11-12 00:00 UTC stored, older ones still being collected
   const pending = { backfill_before: 1, backfill_oldest_ts: '2026-11-12T00:00:00Z', backfill_since: '2026-10-13T00:00:00Z' }

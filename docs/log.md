@@ -526,6 +526,46 @@ What was done and why. Oldest first; new entries go at the bottom.
   shows the split in `tool_calls.timings` instead of being reconstructed from timestamps. `set_/update_my_channels`
   get the same steps through `ensureChannel`.
 
+## 2026-11-18 — Stopped runs, KIS timings, readable errors
+- **Found:** at 12:00 KST telegram-ingest alerted `insidertracking` failing with raw HTML: a Cloudflare 520 from
+  `supabase.co` (the gateway in front of the database API) while upserting posts; that run took 56 s against ~5 s.
+  Around it, kis-ingest slowed: ~27 s per run as usual, but 68 s (10:00), 129 s (11:15), 135 s (11:50), then the
+  11:55 and 12:00 runs stopped at 150 s (`net._http_response`: `timed_out`). Those two left no `ingest_runs` row and
+  sent no alert: the run records itself, and a stopped run never gets that far; `cron.job_run_details` says
+  "succeeded" (it only sent the request). Postgres wasn't slow (`pg_stat_statements` tops are one-off maintenance), so
+  the time went to the API gateway or to KIS (rate-limit back-off); kis-ingest recorded no timings to tell. Not
+  confirmed: the free plan's disk IO budget (Dashboard → Reports → Database).
+- **Done:** `monitored()` writes the `ingest_runs` row when a run starts (`ok = null`: running) and completes it at the
+  end; a handler saves progress into it (`run.progress`). A row still running 180 s after it started was stopped:
+  the next monitored run of any job (telegram-ingest, every 5 minutes) marks it failed (`KILLED_ERROR`) and alerts
+  with its last progress, within the job's hourly throttle (`sweepKilled`; the conditional update marks and alerts
+  each stopped run once, even with two functions sweeping at once). Migration `20261118000002` makes `ok` nullable.
+  **Why:** a run stopped at the time limit was invisible. Reading `net._http_response` instead wasn't an option: it
+  doesn't store the URL, and two jobs start in the same second.
+- **Done:** kis-ingest's answer carries `timings`: token, latest day, stock list, KIS calls (count, total, slowest),
+  rate-limit answers and their waits, the upsert; the same numbers go into the running row every 25 KIS calls and
+  before the upsert, so a stopped run shows its phase.
+- **Done:** `readableError` (`_shared/errors.ts`): an HTML error page in an error message is replaced by its
+  `<title>` (`update posts: HTML error page (supabase.co | 520: …)`), in `ingest_runs.error`, the alerts and
+  Telegram's `last_error`.
+- The daily report counts only `ok = false` as failed (a running row isn't a failure).
+
+## 2026-11-18 — KIS slowdown cause; feed shared across channels
+- **Found:** with the timings deployed, the slow kis-ingest runs are slow KIS calls, not rate limits or the database.
+  12:15 KST: 84.8 s, of which the 93 multprice calls 72.3 s (avg 778 ms, slowest 2.1 s); 12:20: 115.3 s, calls
+  103.1 s (avg 1.1 s, slowest 2.7 s). Both: 0 rate-limit answers, upsert 268 ms, stock list < 0.3 s, token < 0.1 s.
+  A normal ~27 s run is ~9.3 s of the 100 ms pauses plus ~0.16 s per call, so each call got 5–7× slower. Whether
+  that's KIS's servers or the path from Mumbai to Korea isn't told apart; `analyze_stock`'s slow quotes (1.2–1.8 s,
+  11-17) point at KIS. The 12:00 Cloudflare 520 on the Telegram upsert was a separate, one-off gateway error.
+- **Done:** `get_telegram_feed` shares its `limit` across channels (round-robin: each channel's posts numbered newest
+  first, the lowest numbers taken), in one SQL function (`telegram_feed`, migration `20261118000003`). With the
+  default window (no `since`), today's posts (KST) are shared first and earlier days fill what's left. The answer
+  adds `channels` (shown, shown_today, today, in_window per channel) and a `channels_note` when a channel has more
+  than shown. **Why:** the default feed was 20 of 20 from insidertracking (114 posts a day against 1–5 for the four
+  others), and Claude was working around it with one call per channel. On 11-18 data the new default is 11
+  insidertracking + all of today's posts of the other four (5, 2, 1, 1). An explicit `since` spreads the slots over
+  the whole period instead, so a week-long question isn't mostly today.
+
 ## Open
 - Telegram tagging matches only 6-digit codes, so the 96 alphanumeric 종목코드 can be tagged by name only.
 - After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,
@@ -541,3 +581,6 @@ What was done and why. Oldest first; new entries go at the bottom.
 - `tool_calls` has no retention (CAP-4): add a cleanup next to `pipeline-report`'s 90-day delete of `ingest_runs`.
 - The KIS vs KRX check has no threshold (CORR-1): the report lists mismatches but doesn't flag more than 0.5%.
 - Cold latency is unmeasured (PERF-7, PERF-9–11): run `deno task bench:cold` and fill in requirements.md §2.3.
+- KIS slowdown (11-18): the KIS calls themselves got slow (see 11-18 "Feed shared across channels"). Options: a few
+  requests in flight at once under a calls-per-second cap (the 20/s limit is per app key, shared with
+  `analyze_stock`'s quotes), so 93 calls of ~1 s take ~25 s instead of ~100 s.

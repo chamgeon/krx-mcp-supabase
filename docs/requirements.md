@@ -65,9 +65,11 @@ column points at the test that proves it, or is empty where none exists yet.
 |---|---|---|---|
 | FR-ING-1 | M | KIS provisional rows for a day are replaced by KRX official rows once KRX publishes that day. | db_test: "prices view hides live rows for days KRX already published" |
 | FR-ING-2 | M | An ingest batch that fails sanity checks (row count, 6-char 종목코드, no duplicates, OHLC order, 등락률 within ±30.5%; > max(5, 1%) bad rows = failure) is refused, existing data is kept, and the run fails visibly. | `_shared/validate_test.ts` |
-| FR-ING-3 | M | Every ingest run writes one `ingest_runs` row, whether it succeeds or fails. | db_test: "monitored: a run is recorded with its answer" |
+| FR-ING-3 | M | Every ingest run writes one `ingest_runs` row when it starts (running, with progress) and completes it at the end, whether it succeeds or fails. | db_test: "monitored: a run is recorded with its answer", "the row is written when the run starts" |
 | FR-ING-4 | M | A failed run sends a Telegram alert immediately, at most one per job per hour. | db_test: "monitored: a failure alerts once per hour" |
 | FR-ING-5 | M | A daily report at 18:00 KST summarizes ingest runs and the KIS vs KRX close-price comparison. | `pipeline-report/report_test.ts` |
+| FR-ING-6 | M | A run stopped at the Edge Function time limit (so it never completes its row) is marked failed and alerted within 5 minutes, with the progress it had saved. | db_test: "a run stopped at the time limit is marked failed and alerted" |
+| FR-ING-7 | S | Errors in alerts and `last_error` are readable: an HTML error page from a gateway is reduced to its title. | `_shared/errors_test.ts`; db_test: "an HTML error page is recorded and alerted as its title" |
 
 ---
 
@@ -180,7 +182,7 @@ Responses go into an LLM's context window, so size is a cost and a quality issue
 
 | ID | P | Requirement | Baseline | Status |
 |---|---|---|---|---|
-| ING-1 | M | Every ingest run finishes within the Edge Function wall-clock limit with ≥ 25% headroom | krx max **126 s**, p95 112 s; kis max 68 s | ⚠️ krx |
+| ING-1 | M | Every ingest run finishes within the Edge Function wall-clock limit with ≥ 25% headroom | krx max **126 s**, p95 112 s; kis: 129 s and 135 s on 11-18, and two runs stopped at 150 s (11:55, 12:00 KST) | ⚠️ krx, kis |
 | ING-2 | S | kis-ingest p95 ≤ 60 s, so 5-min runs never overlap | p95 45 s | ✅ |
 | ING-3 | S | telegram-ingest p95 ≤ 30 s | p95 7.4 s | ✅ |
 

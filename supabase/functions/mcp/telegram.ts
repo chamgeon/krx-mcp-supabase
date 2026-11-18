@@ -39,6 +39,21 @@ type Msg = {
 
 const MSG_COLUMNS = 'username, msg_id, ts, text, views, forwarded_from, has_media, links, stock_codes'
 
+// A telegram_feed row: a post plus its channel's counts in the window (the same on every row of a channel)
+type FeedRow = Msg & { is_today: boolean; in_window: number; today: number }
+
+/** Per channel in a feed answer: posts shown, posts today (KST) and in the whole window; busiest first. */
+export function feedChannels(rows: FeedRow[]) {
+  const by = new Map<string, { channel: string; shown: number; shown_today: number; today: number; in_window: number }>()
+  for (const r of rows) {
+    const c = by.get(r.username) ?? { channel: r.username, shown: 0, shown_today: 0, today: r.today, in_window: r.in_window }
+    c.shown++
+    if (r.is_today) c.shown_today++
+    by.set(r.username, c)
+  }
+  return [...by.values()].sort((a, b) => b.in_window - a.in_window || a.channel.localeCompare(b.channel))
+}
+
 // Latest trading day, cached per function instance for a few minutes (it changes once a day). Used to look up
 // 종목명 for the stock codes in results.
 let latestDay: { day: string | null; at: number } | null = null
@@ -360,15 +375,18 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       description:
         'Recent posts from collected public Telegram channels, newest first, with a link to each post and the stocks ' +
         'mentioned (matched by 종목명 or 종목코드). Filter by channel, by stock, and by time. Channels are polled ' +
-        'every 5 minutes. Without a channel, shows the channels the user follows ' +
+        'every 5 minutes. Across several channels the `limit` slots are shared fairly, so one busy channel cannot ' +
+        "crowd out the others; with the default window (no `since`), today's posts (KST) come first and earlier days " +
+        'fill the rest. `channels` gives each channel\'s shown / today / total posts in the window: pass `channel` ' +
+        'to read all of one channel. Without a channel, shows the channels the user follows ' +
         '(get_my_channels), or every collected channel if they follow none or all_channels is true. Use ' +
         'add_telegram_channel to collect a new channel.',
       inputSchema: z.object({
         channel: z.string().optional().describe("one channel (@name, name, or t.me link); omit for the user's channels"),
         all_channels: z.boolean().default(false).describe("every collected channel, not just the user's"),
         stock: z.string().optional().describe('종목코드 or exact 종목명: only posts mentioning it'),
-        since: z.string().optional().describe('YYYY-MM-DD (KST) or ISO time; default: 3 days ago'),
-        limit: z.number().int().min(1).max(100).default(20),
+        since: z.string().optional().describe("YYYY-MM-DD (KST) or ISO time; default: 3 days ago, today's posts first"),
+        limit: z.number().int().min(1).max(100).default(20).describe('posts in all, shared fairly across channels'),
         max_chars: z.number().int().min(100).max(5000).default(1500).describe('truncate each post to this many characters'),
       }),
       annotations: { readOnlyHint: true },
@@ -392,12 +410,15 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       }
 
       const sinceTs = sinceIso(since, 3)
-      const messages = (scope: string[] | null) => { // null = every channel
-        let q = supabase.from('telegram_messages').select(MSG_COLUMNS).gte('ts', sinceTs)
-        if (scope) q = q.in('username', scope)
-        if (code) q = q.contains('stock_codes', [code])
-        return step('messages', q.order('ts', { ascending: false }).limit(limit))
-      }
+      // Round-robin across channels, today first in the default window (migration 20261118000003_telegram_feed.sql)
+      const messages = (scope: string[] | null) => // null = every channel
+        step('messages', supabase.rpc('telegram_feed', {
+          p_since: sinceTs,
+          p_limit: limit,
+          p_channels: scope,
+          p_stock: code,
+          p_today_first: !since,
+        }))
 
       // The backfill check runs alongside the posts query (same scope)
       let scopeLabel: string
@@ -417,12 +438,22 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
         scopeLabel = mine.length ? `your channels (${mine.length})` : 'all collected channels'
       }
       if (res.error) throw new Error(res.error.message)
-      const data = res.data
+      const data = (res.data ?? []) as FeedRow[]
+      const channels = feedChannels(data)
+      const cut = channels.filter((c) => c.shown < c.in_window)
       return json({
         scope: scopeLabel,
-        count: data?.length ?? 0,
+        count: data.length,
+        ...(channels.length > 1 || cut.length ? { channels } : {}),
+        ...(cut.length && !name
+          ? {
+            channels_note: `Slots are shared across channels${since ? '' : ", today's posts first"}; ` +
+              `${cut.map((c) => c.channel).join(', ')} ${cut.length === 1 ? 'has' : 'have'} more posts in this window ` +
+              'than shown. Pass channel=<name> (and a larger limit) to read one channel in full.',
+          }
+          : {}),
         ...withCollecting(pending),
-        posts: await present((data ?? []) as Msg[], max_chars, day),
+        posts: await present(data, max_chars, day),
       })
     },
   )

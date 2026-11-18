@@ -8,6 +8,7 @@
 
 import { parseHTML } from 'npm:linkedom@0.18.5'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
+import { readableError } from './errors.ts'
 
 const UA = 'Mozilla/5.0 (compatible; kr-stock-mcp/1.0; public channel reader)'
 const PAGE_PAUSE_MS = 800
@@ -323,7 +324,7 @@ export async function syncChannel(
     }).eq('username', channel)
     return { channel, ok: true, new_posts: newPosts, pages, ...(backfill ? { backfill_pending: true } : {}) }
   } catch (e) {
-    const msg = (e as Error).message
+    const msg = readableError((e as Error).message) // an HTML error page from a gateway becomes its title
     const { data: cur } = await supabase.from('telegram_channels').select('poll_errors').eq('username', channel).single()
     await supabase.from('telegram_channels').update({
       last_polled_at: new Date().toISOString(),
@@ -413,7 +414,7 @@ export async function backfillChannel(
     await finish(DONE) // page cap: a busy channel keeps less than 30 days
     return { ...result, done: true }
   } catch (e) {
-    const msg = (e as Error).message
+    const msg = readableError((e as Error).message)
     try {
       await finish(pages >= BACKFILL_MAX_PAGES ? DONE : {})
     } catch { /* the state is saved after every page; at worst this page is retried */ }

@@ -10,7 +10,7 @@
 import { assert, assertEquals } from 'jsr:@std/assert@1'
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { analyze, type Row } from '../functions/mcp/analyze.ts'
-import { monitored } from '../functions/_shared/ops.ts'
+import { KILLED_ERROR, monitored, sweepKilled } from '../functions/_shared/ops.ts'
 
 const URL = Deno.env.get('LOCAL_SUPABASE_URL') ?? 'http://127.0.0.1:54321'
 // The service role key every local Supabase stack uses (public demo value, not a secret)
@@ -536,6 +536,70 @@ Deno.test('monitored: without the Telegram secrets the failure is still recorded
     await failing(new Request('http://x'))
     const runs = await runsOf(job)
     assertEquals(runs.map((r) => [r.ok, r.alerted]), [[false, false]])
+  } finally {
+    await db.from('ingest_runs').delete().eq('job', job)
+  }
+})
+
+Deno.test('monitored: the row is written when the run starts (running, with progress) and completed at the end', async () => {
+  const job = `test-${crypto.randomUUID()}`
+  try {
+    let during: Record<string, unknown>[] = []
+    const handler = monitored(job, db, async (_req, run) => {
+      await run.progress({ phase: 'kis_calls', kis_calls: 25 })
+      during = await runsOf(job)
+      return Response.json({ date: '20261118', rows: 2771 })
+    })
+    await withTelegramStub(() => handler(new Request('http://x')))
+    assertEquals(during.map((r) => [r.ok, r.ms, r.summary]), [[null, null, { progress: { phase: 'kis_calls', kis_calls: 25 } }]])
+    const runs = await runsOf(job)
+    assertEquals(runs.map((r) => [r.id, r.ok, r.status, r.summary]), [[during[0].id, true, 200, { date: '20261118', rows: 2771 }]])
+  } finally {
+    await db.from('ingest_runs').delete().eq('job', job)
+  }
+})
+
+Deno.test('monitored: a run stopped at the time limit is marked failed and alerted by the next run of any job', async () => {
+  const stopped = `test-${crypto.randomUUID()}`
+  const other = `test-${crypto.randomUUID()}`
+  try {
+    const ago = (s: number) => new Date(Date.now() - s * 1000).toISOString()
+    const { error } = await db.from('ingest_runs').insert([
+      // started 10 minutes ago and never completed: stopped
+      { job: stopped, started_at: ago(600), ok: null, summary: { progress: { phase: 'kis_calls', kis_calls: 50 } } },
+      // started 30 s ago: still running, left alone
+      { job: stopped, started_at: ago(30), ok: null },
+    ])
+    if (error) throw new Error(error.message)
+
+    const next = monitored(other, db, () => Promise.resolve(Response.json({ polled: 0, results: [] })))
+    const { alerts } = await withTelegramStub(() => next(new Request('http://x')))
+    const rows = await runsOf(stopped)
+    assertEquals(rows.map((r) => [r.ok, r.error, r.alerted, r.ms, r.status]), [
+      [false, KILLED_ERROR, true, null, null],
+      [null, null, false, null, null],
+    ])
+    assertEquals(alerts.length, 1)
+    assert(alerts[0].includes(`❌ ${stopped} was stopped before it finished`) && alerts[0].includes('"kis_calls":50'), alerts[0])
+    assertEquals((await runsOf(other)).map((r) => r.ok), [true])
+
+    // Marked once: another sweep finds nothing to mark and sends nothing
+    const { result, alerts: again } = await withTelegramStub(() => sweepKilled(db))
+    assertEquals([result, again.length], [0, 0])
+  } finally {
+    await db.from('ingest_runs').delete().in('job', [stopped, other])
+  }
+})
+
+Deno.test('monitored: an HTML error page is recorded and alerted as its title', async () => {
+  const job = `test-${crypto.randomUUID()}`
+  try {
+    const page = '<!DOCTYPE html><html><head><title>supabase.co | 520: Web server is returning an unknown error</title></head></html>'
+    const failing = monitored(job, db, () => Promise.resolve(Response.json({ error: `upsert 2026-11-18: ${page}` }, { status: 500 })))
+    const { alerts } = await withTelegramStub(() => failing(new Request('http://x')))
+    const want = 'upsert 2026-11-18: HTML error page (supabase.co | 520: Web server is returning an unknown error)'
+    assertEquals((await runsOf(job)).map((r) => r.error), [want])
+    assert(alerts[0].includes(want) && !alerts[0].includes('DOCTYPE'), alerts[0])
   } finally {
     await db.from('ingest_runs').delete().eq('job', job)
   }
