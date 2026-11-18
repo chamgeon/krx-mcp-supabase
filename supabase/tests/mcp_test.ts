@@ -145,6 +145,28 @@ test('wrong ?key= and invalid tokens are rejected', async () => {
   await anon.body?.cancel()
 })
 
+test('a valid login that is not on ALLOWED_USERS gets a 403, not the tools', async () => {
+  const outsider = { email: 'mcp-outsider@example.com', password: 'mcp-outsider-password-1' }
+  const created = await admin.auth.admin.createUser({ ...outsider, email_confirm: true })
+  if (created.error && !/already/i.test(created.error.message)) throw new Error(created.error.message)
+  const signIn = await fetch(`${BASE}/auth/v1/token?grant_type=password`, {
+    method: 'POST',
+    headers: { apikey: ANON_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(outsider),
+  })
+  const { access_token } = await signIn.json()
+  assert(access_token, 'outsider signed in')
+  const res = await fetch(MCP, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+  })
+  assertEquals(res.status, 403)
+  const body = await res.json()
+  assertEquals(body.error, 'forbidden')
+  assertStringIncludes(body.error_description, 'invite-only')
+})
+
 test('a logged-in user token works', async () => {
   const { token } = await testUser()
   const client = await connect({ token })

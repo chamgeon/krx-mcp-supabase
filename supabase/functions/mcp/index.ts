@@ -2,9 +2,10 @@
 // Reads from Postgres (filled by kis-ingest / krx-ingest). The only outside call is a live KIS quote for one
 // stock in analyze_stock during the session.
 //
-// URL to give ChatGPT / Claude (users log in with OAuth; see "Auth" at the bottom):
+// Self-hosted, for its operator and a small closed group: OAuth login, and only allowlisted accounts (see "Auth" at
+// the bottom). URL to give ChatGPT / Claude:
 //   https://<project-ref>.supabase.co/functions/v1/mcp
-// Legacy shared URL, kept during the transition:
+// The operator's key for scripts and benchmarks (no login; keep it private):
 //   https://<project-ref>.supabase.co/functions/v1/mcp?key=<MCP_ACCESS_KEY>
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
@@ -12,6 +13,7 @@ import { createMcpHandler, McpServer } from 'npm:@modelcontextprotocol/server@^2
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { z } from 'npm:zod@^4.3.6'
 import { createRemoteJWKSet, jwtVerify } from 'npm:jose@^5.9.6'
+import { isAllowed, parseAllowed } from './allow.ts'
 import {
   forgetKisToken,
   isTokenRejected,
@@ -695,7 +697,11 @@ const handler = createMcpHandler((ctx) => {
 //      (dynamic client registration) and sends the user through login + the consent page (web/oauth/consent.html).
 //   3. The client calls this function with "Authorization: Bearer <access token>", a Supabase user JWT. We verify it
 //      locally against the project's public keys (ES256 JWKS), so no Auth API call per request.
-// The old shared ?key= URL keeps working during the transition and is logged as auth = 'shared_key'.
+//   4. Only allowlisted accounts get in (ALLOWED_USERS: user ids or emails, comma-separated). This is a self-hosted
+//      deployment for its operator and a small closed group, not a public service: a valid login alone isn't enough.
+//      Unset or empty = nobody (fails closed), so set the secret before deploying.
+// The operator's key (?key=MCP_ACCESS_KEY) skips login: for the operator's own scripts (scripts/bench.ts), logged as
+// auth = 'shared_key'. Keep it private like a password.
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 // The URL clients see, used as the token issuer and in the metadata. Same as SUPABASE_URL in production; only the
@@ -706,6 +712,17 @@ const AUTH_ISSUER = `${PUBLIC_URL}/auth/v1`
 const MCP_URL = `${PUBLIC_URL}/functions/v1/mcp`
 const RESOURCE_METADATA_URL = `${MCP_URL}/.well-known/oauth-protected-resource`
 const jwks = createRemoteJWKSet(new URL(`${SUPABASE_URL}/auth/v1/.well-known/jwks.json`))
+const ALLOWED_USERS = parseAllowed(Deno.env.get('ALLOWED_USERS'))
+if (!ALLOWED_USERS.size) console.error('ALLOWED_USERS is not set: every login will be refused')
+
+function forbidden(): Response {
+  return Response.json({
+    error: 'forbidden',
+    // Shown to someone who signed in but isn't on ALLOWED_USERS: a private setup, not a judgement on them
+    error_description: 'This is a private, invite-only server, and access is set up per account. If someone shared ' +
+      'it with you, please ask them to add this account.',
+  }, { status: 403 })
+}
 // The only scope we ask for: a refresh token, so users don't log in again when the ~1 h access token expires.
 // Without this hint clients request everything Supabase supports (openid profile email phone ...), none of which
 // the server reads; the access token alone identifies the user.
@@ -782,7 +799,7 @@ async function handle(req: Request): Promise<Response> {
     })
   }
 
-  // Transition: the shared ?key= URL still works.
+  // The operator's key (scripts, benchmarks): no login
   if (url.searchParams.get('key') === MCP_ACCESS_KEY) return handler.fetch(req)
 
   const header = req.headers.get('authorization') ?? ''
@@ -791,6 +808,10 @@ async function handle(req: Request): Promise<Response> {
   try {
     const { payload } = await jwtVerify(token, jwks, { issuer: AUTH_ISSUER })
     if (!payload.sub || payload.role !== 'authenticated') return unauthorized('not a user token')
+    if (!isAllowed(ALLOWED_USERS, payload.sub, payload.email)) {
+      console.warn(`login refused: ${payload.sub} is not on ALLOWED_USERS`)
+      return forbidden()
+    }
     return handler.fetch(req, {
       authInfo: {
         token,

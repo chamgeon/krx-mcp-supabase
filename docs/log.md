@@ -646,6 +646,21 @@ What was done and why. Oldest first; new entries go at the bottom.
   `screen_stocks`' SQL itself (1.33–1.88 s cold against ~0.25 s warm), which looks like a cold database cache rather
   than connection setup (its first query, `latest_date`, already paid that). Not checked.
 
+## 2026-11-18 — Re-scoped: self-hosted, personal use or a small closed group
+- **Decided:** the project is a self-hosted tool for its operator and a small closed group (currently 2 people), not a
+  service handed to PBs or listed publicly. **Why:** KRX's and KIS's terms are written for personal use and restrict
+  passing data on to third parties, and redistributing Telegram posts to professionals is the riskiest part. A closed
+  group is still a grey area under those terms (low risk because it stays small and private); the README says the
+  operator is responsible for them. Checked: no data or keys in the git history (the committed `sql/cron.sql` only
+  ever had placeholders).
+- **Done:** `ALLOWED_USERS` (`mcp/allow.ts`): after the token is verified, only listed user ids or emails get in; any
+  other login gets a 403, and an unset list lets nobody in (fails closed). **Why:** `mcp` accepted any valid Supabase
+  login, so whoever could sign in with Google had full access unless sign-ups were off in the dashboard. Backed up by
+  Google's consent screen in Testing with listed test users, and Supabase sign-ups off (README → Login).
+- The `?key=` URL is now the operator's key for scripts and benchmarks, not a transition.
+- README: a "Scope & data" section; `docs/plan.md`: a re-scope note on top, history kept; tool descriptions say "this
+  deployment" instead of "all users". The per-user features stay: they're what a small group needs.
+
 ## Open
 - After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,
   shorten the quote's backoff (one request needs little of the per-second budget), pace `kis-ingest`'s burst, or use

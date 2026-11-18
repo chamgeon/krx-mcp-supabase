@@ -1,5 +1,10 @@
 # kismcp Plan
 
+> **Re-scoped 2026-11-18:** a self-hosted tool for personal use or a small closed group (allowlisted accounts), not a
+> service for PBs at other firms. KRX's and KIS's terms are written for personal use and restrict passing data on, and
+> redistributing Telegram posts to professionals is the riskiest part. The phases below are kept as the history of
+> how the features came about; "users" now means the group on a deployment. See README → Scope & data.
+
 ## Rules
 
 - Data comes from the MCP. Insight comes from the PB, so don't build "insight" features.

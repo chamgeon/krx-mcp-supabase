@@ -212,7 +212,8 @@ Responses go into an LLM's context window, so size is a cost and a quality issue
 
 | ID | P | Requirement | Status |
 |---|---|---|---|
-| SEC-1 | M | Every MCP call is authenticated (OAuth or shared key); unauthenticated calls are rejected (mcp_test: "no token: 401", "wrong ?key= and invalid tokens are rejected") | ✅ |
+| SEC-1 | M | Every MCP call is authenticated (OAuth or the operator's key); unauthenticated calls are rejected (mcp_test: "no token: 401", "wrong ?key= and invalid tokens are rejected") | ✅ |
+| SEC-7 | M | Only allowlisted accounts (`ALLOWED_USERS`) get in: a valid login that isn't on the list gets a 403, and an unset list lets nobody in (mcp_test: "a valid login that is not on ALLOWED_USERS gets a 403"; `mcp/allow_test.ts`) | ✅ |
 | SEC-2 | M | `tool_calls`, `ingest_runs` and user channel data are readable only by the service role or their owner (RLS) | ✅ |
 | SEC-3 | M | `tool_calls` stores tool arguments only, never prompts or secrets | ✅ |
 | SEC-4 | M | KRX data is not redistributed to third parties: each deployment uses its own KRX key | ✅ |

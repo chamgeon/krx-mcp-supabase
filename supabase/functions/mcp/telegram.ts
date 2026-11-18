@@ -9,7 +9,7 @@ import {
 } from '../_shared/telegram.ts'
 import { early, step } from './timing.ts'
 
-const MAX_CHANNELS = 50 // cap on shared collection, so open adding can't turn the server into a crawler
+const MAX_CHANNELS = 50 // cap on the deployment's collection, so adding channels can't turn it into a crawler
 
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined
 
@@ -189,7 +189,8 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     {
       title: '텔레그램 채널 추가',
       description:
-        'Starts collecting a public Telegram channel (one with a t.me/s/<name> web preview) for all users and returns ' +
+        'Starts collecting a public Telegram channel (one with a t.me/s/<name> web preview) for everyone on this ' +
+        'deployment and returns ' +
         `its latest posts. About ${BACKFILL_DAYS} days of older posts are collected in the background right after ` +
         '(usually under a minute; get_telegram_feed and search_telegram say when a channel is still filling). After ' +
         'this the channel is polled automatically. Private channels and channels with the preview turned off cannot be added. Accepts @name, ' +

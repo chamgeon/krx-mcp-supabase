@@ -5,6 +5,19 @@ KOSDAQ stock.
 It runs entirely on the Supabase free plan: scheduled Edge Functions load daily data into Postgres, and a third Edge
 Function serves it over MCP.
 
+## Scope & data
+
+- **Self-hosted, for personal use or a small closed group.** Each deployment is run by its operator for themselves and,
+  at most, a few people they choose. It is not a public service, and this repo doesn't host one.
+- **No data ships with this repo.** No prices, no Telegram posts, no keys: test data is made up, and real API responses
+  used in parser tests stay local (gitignored).
+- **Each deployment uses its own access:** its own KRX and KIS API keys and its own Telegram setup.
+- **Access is limited to an allowlist.** Users log in with OAuth, and only accounts listed in `ALLOWED_USERS` get in
+  ([Login](#7-login-oauth)).
+- **The operator is responsible for the data sources' terms** for everyone they let in. KRX's and KIS's terms are
+  written for personal use and restrict passing data on to third parties; Telegram posts belong to their channels.
+  Show short excerpts with links, and don't republish them.
+
 ```
 KIS Open API ──(pg_cron, every 5 min + after close)──> kis-ingest ─┐  same day, provisional
                                                                    ├─> Postgres ──> mcp ──> ChatGPT / Claude
@@ -79,7 +92,8 @@ Triggered conditions come back as a `signals` list (`TRDVAL_SPIKE`, `BREAKOUT_12
    - 주식 → **코스닥 일별매매정보** (`ksq_bydd_trd`)
 3. Approval usually comes the same day.
 
-KRX's terms don't allow passing the data on to third parties, so each user should register their own key.
+KRX's terms don't allow passing the data on to third parties, so each deployment should use its operator's own key
+(see [Scope & data](#scope--data)).
 
 #### KIS (한국투자증권)
 
@@ -106,7 +120,8 @@ every auth/database/storage setting `config.toml` declares; run `supabase config
 
 ### 3. Secrets
 
-Generate two random strings (e.g. `openssl rand -hex 24`), one for the ingest job and one for the MCP URL:
+Generate two random strings (e.g. `openssl rand -hex 24`), one for the ingest jobs and one for the operator's key
+(`?key=` access for your own scripts and benchmarks, no login):
 
 ```bash
 supabase secrets set \
@@ -116,6 +131,8 @@ supabase secrets set \
   INGEST_SECRET=<random string 1> \
   MCP_ACCESS_KEY=<random string 2>
 ```
+
+`ALLOWED_USERS` (who may log in) is set after the first login; see [Login](#7-login-oauth).
 
 For pipeline alerts and the daily report on Telegram: create a bot with @BotFather, send it any message, read your chat
 id from `https://api.telegram.org/bot<TOKEN>/getUpdates` (`message.chat.id`), then:
@@ -180,7 +197,8 @@ It schedules:
 
 ### 7. Login (OAuth)
 
-Users log in with Google, and Supabase Auth acts as the OAuth 2.1 server for MCP clients. One-time setup:
+Allowlisted accounts log in with Google, and Supabase Auth acts as the OAuth 2.1 server for MCP clients. One-time
+setup:
 
 1. **Consent page.** `web/oauth/consent.html` is where users sign in and approve the connection. Fill in your project
    URL and publishable key at the top of its script. Then, in the GitHub repo, open Settings → Pages and set Source to
@@ -192,13 +210,24 @@ Users log in with Google, and Supabase Auth acts as the OAuth 2.1 server for MCP
    - Site URL: `https://<owner>.github.io/<repo>`
    - Redirect URLs: add `https://<owner>.github.io/<repo>/oauth/**`
 4. **Google login:**
-   - In Google Cloud Console, create a project and an OAuth consent screen: External, basic scopes only, then
-     **Publish app**.
+   - In Google Cloud Console, create a project and an OAuth consent screen: External, basic scopes only. Leave it in
+     **Testing** and add the group's Google accounts as test users, so nobody else can sign in at all.
    - Create an OAuth client (Web application) with the authorized redirect URI
      `https://<PROJECT_REF>.supabase.co/auth/v1/callback`.
    - Paste its client ID and secret into Supabase → Authentication → Sign In / Providers → Google.
 
-The MCP function verifies each access token locally against the project's public keys (`/auth/v1/.well-known/jwks.json`).
+5. **Supabase → Authentication → Sign In / Providers:** turn off **Allow new users to sign up** once everyone in the
+   group has logged in once.
+6. **Allowlist.** After each person's first login, find their user id (Supabase → Authentication → Users, or
+   `select id, email from auth.users`) and set the list (ids or emails, comma-separated):
+   ```bash
+   supabase secrets set ALLOWED_USERS=<your user id>,<another user id>
+   ```
+   Secrets apply to new function instances; redeploy `mcp` to be sure. With no list set, every login is refused
+   (403); the first login creates the account even so, which is how you get the id.
+
+The MCP function verifies each access token locally against the project's public keys (`/auth/v1/.well-known/jwks.json`),
+then checks the user against `ALLOWED_USERS`.
 
 ### 8. Connect a chatbot
 
@@ -214,7 +243,7 @@ The client opens the login page the first time it connects.
 - **Claude**: Settings → Connectors → Add custom connector.
 - **Testing**: `npx -y @modelcontextprotocol/inspector`
 
-The old shared URL (`…/mcp?key=<MCP_ACCESS_KEY>`) still works during the transition, with no login.
+The operator's URL (`…/mcp?key=<MCP_ACCESS_KEY>`) works without login, for your own scripts (`deno task bench`).
 
 After a tool's parameters change, refresh the connector so the client sees the new schema.
 
@@ -275,8 +304,8 @@ matter. Then redeploy the Edge Functions, set the secrets, and recreate the cron
 
 ## Warnings
 
-- **Keep the shared `?key=` URL private** while it still works. Anyone who has it can call the server without logging
-  in, and their calls are logged as `shared_key`.
+- **Keep the operator's `?key=` URL private.** Anyone who has it can call the server without logging in or being on
+  the allowlist; its calls are logged as `shared_key`.
 - **Free-plan pause.** Supabase pauses projects that are inactive for 7 days. The daily cron job keeps the project
   active. If it does pause, restore it from the dashboard; the data is kept.
 - **Storage.** A year of history takes ~270 MB of the 500 MB free database, and nothing deletes old rows yet.
