@@ -594,6 +594,23 @@ What was done and why. Oldest first; new entries go at the bottom.
 - This is the cost parked on 11-17 ("Cold calls accepted for now"). The options stand: a keep-warm ping, or moving
   the project to us-east-1 (removes the forward hop and puts the database next to Claude's calls).
 
+## 2026-11-18 — kis-ingest in Seoul: first runs, network errors
+- Seoul works: from 12:45 KST every run has `ran_in: ap-northeast-2`; runs take 15.7–22.3 s (against 29–115 s from
+  Mumbai today), the KIS phase 9.2–12.0 s (bounded by the 10/s cap). The database steps got slower from Seoul (stock
+  list ~2 s, upsert ~2.7 s, against ~0.2–0.3 s each), well worth it.
+- **Found:** the 13:20 and 13:25 runs failed on one KIS request each that got no answer at all (Deno: "error sending
+  request from 10.32.33.59:… for https://openapi.koreainvestment.com:9443/…"), after 15 and 83 of 93 calls. No retry
+  for that, so one failed call failed the snapshot (the previous one stayed). The cause was cut off: Deno's message
+  starts with the full URL (~1,000 characters of stock codes), and ingest_runs keeps 1,000 characters. Rate-limit
+  answers ran at 4–15 per run at 10/s (the old one-at-a-time code saw 0–1).
+- **Done:** `kisGet` retries a request that got no answer twice (after 0.5 s, then 1 s; read-only GETs, so safe), and
+  its final error names the call and the cause without the query string. **Why:** the usual cause of this error is a
+  pooled keep-alive connection the server already closed, which a retry replaces; parallel calls keep more of them.
+  `timings.network_retries` counts them. `analyze_stock`'s quotes get the same retries.
+- **Done:** `readableError` drops URLs' query strings, so the cause after a long URL survives in alerts and
+  `ingest_runs.error`.
+- **Done:** KIS pace 10/s → 8/s (KIS phase ~11.6 s), for fewer rate-limit answers and more room for live quotes.
+
 ## Open
 - Telegram tagging matches only 6-digit codes, so the 96 alphanumeric 종목코드 can be tagged by name only.
 - After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,

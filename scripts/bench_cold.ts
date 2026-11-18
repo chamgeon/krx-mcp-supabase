@@ -8,6 +8,7 @@
 //
 //   deno task bench:cold                                  # every case × 5, landing in us-east-1: ~2 h
 //   deno task bench:cold --n 3 --only get_stock_history   # one tool (matches the tool name): ~8 min
+//   deno task bench:cold --only analyze_stock,screen_stocks   # several tools, comma-separated
 //   deno task bench:cold --region ap-south-1              # land next to the database (no forward)
 //
 // Real traffic keeps arriving during the run, and a worker it starts can be reused by a benchmark call shortly after.
@@ -26,17 +27,18 @@ import {
 
 const N = Math.max(1, Number(arg('n') ?? 5))
 const PAUSE_S = Number(arg('pause') ?? 150)
-const ONLY = arg('only') ?? ''
+const ONLY = (arg('only') ?? '').split(',').map((s) => s.trim()).filter(Boolean)
 const REGION = region('us-east-1')
 const WINDOW_S = 150 // real calls this long before a benchmark call may have left a worker running
 
 if (PAUSE_S < 150) console.warn(`--pause ${PAUSE_S}: under 150 s a worker may survive, so calls may not be cold`)
 
-const cases = CASES.filter((c) => !ONLY || c.tool === ONLY)
-if (!cases.length) {
-  console.error(`--only: no case for tool ${ONLY}`)
+const unknown = ONLY.filter((t) => !CASES.some((c) => c.tool === t))
+if (unknown.length) {
+  console.error(`--only: no case for tool ${unknown.join(', ')} (tools: ${[...new Set(CASES.map((c) => c.tool))].join(', ')})`)
   Deno.exit(1)
 }
+const cases = CASES.filter((c) => !ONLY.length || ONLY.includes(c.tool))
 
 type ColdCall = Call & { i: number; sample: number }
 const calls: ColdCall[] = []

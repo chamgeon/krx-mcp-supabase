@@ -76,7 +76,14 @@ export type KisGetOptions = {
   // Called with each rate-limit wait (a promise that resolves when the wait is over); the call waits on what it returns.
   // Lets a caller record the waits (mcp: a `kis_rate_limited` step) without this module knowing about timings.
   onRateLimited?: (wait: Promise<void>) => PromiseLike<void>
+  // Called before each retry after a network error (no HTTP answer at all), with the error
+  onNetworkRetry?: (error: Error) => void
 }
+
+// A request that got no HTTP answer (connection reset, a pooled keep-alive connection KIS had already closed, TLS,
+// DNS) is retried after these waits: on 2026-11-18 two kis-ingest runs failed on one such error each, mid-snapshot.
+// Every KIS call here is a read-only GET, so a retry is safe.
+const NETWORK_RETRY_MS = [500, 1000]
 
 export async function kisGet(
   token: string,
@@ -86,17 +93,31 @@ export async function kisGet(
   opts: KisGetOptions = {},
 ) {
   const url = `${KIS_BASE}${path}?${new URLSearchParams(params)}`
+  let networkRetries = 0
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, {
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        authorization: `Bearer ${token}`,
-        appkey: KIS_APP_KEY,
-        appsecret: KIS_APP_SECRET,
-        tr_id: trId,
-        custtype: 'P',
-      },
-    })
+    let res: Response
+    try {
+      res = await fetch(url, {
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          authorization: `Bearer ${token}`,
+          appkey: KIS_APP_KEY,
+          appsecret: KIS_APP_SECRET,
+          tr_id: trId,
+          custtype: 'P',
+        },
+      })
+    } catch (e) {
+      // Deno's message names the full URL (~1,000 characters of stock codes for multprice) before the cause, so the
+      // query string is dropped to keep the cause readable
+      const why = (e as Error).message.replaceAll(url, `${KIS_BASE}${path}`)
+      if (networkRetries < NETWORK_RETRY_MS.length) {
+        opts.onNetworkRetry?.(e as Error)
+        await sleep(NETWORK_RETRY_MS[networkRetries++])
+        continue
+      }
+      throw new KisError(`KIS ${trId}: no answer after ${networkRetries + 1} attempts: ${why}`, 0, null)
+    }
     const body = await res.json().catch(() => null)
     if (res.ok && body?.rt_cd === '0') return body
     // EGW00201 = 초당 거래건수 초과: back off and retry. The limit is per app key, shared with kis-ingest's bursts.

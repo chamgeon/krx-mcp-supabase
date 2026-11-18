@@ -19,7 +19,8 @@
 // 150 s limit still shows which phase it was in.
 //
 // The multprice calls run KIS_CONCURRENCY at a time under KIS_PER_SECOND (./pool.ts): KIS's limit is 20 calls/s per
-// app key, shared with the mcp function's live quotes, so half is left for those. The cron jobs call this function
+// app key, shared with the mcp function's live quotes, so most of it is left for those. A request that gets no answer
+// at all is retried by kisGet (`timings.network_retries`). The cron jobs call this function
 // with `x-region: ap-northeast-2` (sql/cron.example.sql), so it runs in Seoul next to KIS; its few database calls
 // cross to the database's region instead. `timings.ran_in` shows where a run ran.
 
@@ -33,7 +34,7 @@ import { pacedPool } from './pool.ts'
 const MULTI_MAX = 30 // intstock-multprice: up to 30 stocks per call
 const PROGRESS_EVERY = 25 // KIS calls between progress saves (~4 per run)
 const KIS_CONCURRENCY = 5
-const KIS_PER_SECOND = 10
+const KIS_PER_SECOND = 8 // 10/s drew 4–15 rate-limit answers per run (11-18), each a 1 s retry
 const HERE_REGION = Deno.env.get('SB_REGION') || null // set by Supabase; unset locally
 
 // Where a run's time goes (ms), for the answer and the running row's progress
@@ -50,6 +51,7 @@ type Timings = {
   kis_slowest_ms: number
   rate_limited: number // EGW00201 answers (each waits 1 s and retries)
   rate_limit_wait_ms: number
+  network_retries: number // requests retried after getting no answer (kisGet)
   upsert_ms?: number
 }
 
@@ -141,7 +143,10 @@ async function snapshot(
       params[`FID_INPUT_ISCD_${j + 1}`] = p.isu_cd
     })
     const c0 = performance.now()
-    const body = await kisGet(token, '/uapi/domestic-stock/v1/quotations/intstock-multprice', 'FHKST11300006', params, { onRateLimited })
+    const body = await kisGet(token, '/uapi/domestic-stock/v1/quotations/intstock-multprice', 'FHKST11300006', params, {
+      onRateLimited,
+      onNetworkRetry: () => t.network_retries++,
+    })
     const ms = Math.round(performance.now() - c0)
     t.kis_calls++
     t.kis_ms += ms
@@ -180,7 +185,7 @@ Deno.serve(monitored('kis-ingest', supabase, async (req, run) => {
   const asOf = new Date().toISOString()
   const today = todayKst()
   const todayIso = toIsoDate(today)
-  const t: Timings = { phase: 'start', ran_in: HERE_REGION, kis_calls: 0, kis_ms: 0, kis_slowest_ms: 0, rate_limited: 0, rate_limit_wait_ms: 0 }
+  const t: Timings = { phase: 'start', ran_in: HERE_REGION, kis_calls: 0, kis_ms: 0, kis_slowest_ms: 0, rate_limited: 0, rate_limit_wait_ms: 0, network_retries: 0 }
   try {
     t.phase = 'token'
     const token = await timed(t, 'token_ms', kisToken(supabase))

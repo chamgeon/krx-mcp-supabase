@@ -103,6 +103,33 @@ Deno.test('isTokenRejected: only KIS token errors', () => {
   assert(!isTokenRejected(new Error('network')))
 })
 
+Deno.test('kisGet: a network error is retried, and the final error names the cause, not the whole URL', async () => {
+  const realFetch = globalThis.fetch
+  const url = (input: unknown) => String(input instanceof Request ? input.url : input)
+  const fail = (input: unknown) =>
+    Promise.reject(new TypeError(`error sending request from 10.0.0.1:49000 for ${url(input)} (openapi.koreainvestment.com:9443): client error (SendRequest): connection closed before message completed`))
+  try {
+    // fails once, then answers
+    let n = 0
+    const retried: string[] = []
+    globalThis.fetch = ((input: unknown) => (n++ === 0 ? fail(input) : Promise.resolve(Response.json({ rt_cd: '0', output: [] })))) as typeof fetch
+    const body = await kisGet('token', '/path', 'TR', { FID_INPUT_ISCD_1: '005930' }, { onNetworkRetry: (e) => retried.push(e.message) })
+    assertEquals([body.rt_cd, n, retried.length], ['0', 2, 1])
+
+    // fails every time: 3 attempts, then a KisError with the cause and no query string
+    n = 0
+    globalThis.fetch = ((input: unknown) => (n++, fail(input))) as typeof fetch
+    const err = await kisGet('token', '/path', 'TR', { FID_INPUT_ISCD_1: '005930' }).catch((e) => e)
+    assert(err instanceof KisError)
+    assertEquals(n, 3)
+    assert(err.message.startsWith('KIS TR: no answer after 3 attempts: error sending request'), err.message)
+    assert(err.message.includes('connection closed before message completed'), err.message)
+    assert(!err.message.includes('FID_INPUT_ISCD_1'), err.message)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
 Deno.test('kisGet: a rate-limited request waits, reports the wait, and retries', async () => {
   const realFetch = globalThis.fetch
   const answers = [{ rt_cd: '1', msg_cd: 'EGW00201', msg1: '초당 거래건수를 초과하였습니다.' }, { rt_cd: '0', output: { stck_prpr: '1000' } }]

@@ -5,8 +5,12 @@
 // lines of <!DOCTYPE html>… and nothing useful. The page's <title> says what happened
 // ("supabase.co | 520: Web server is returning an unknown error"), so the HTML is replaced with it.
 
-/** `message` with an HTML error page in it replaced by the page's title. Other messages are returned as they are. */
+/**
+ * `message` with an HTML error page in it replaced by the page's title, and URLs without their query strings (a long
+ * query, like KIS's 30 stock codes, would push the cause past a stored error's length limit). Other text is unchanged.
+ */
 export function readableError(message: string): string {
+  message = message.replace(/(https?:\/\/[^\s?"'<>]+)\?[^\s"'<>)]+/g, '$1?…')
   const at = message.search(/<!DOCTYPE html|<html[\s>]/i)
   if (at < 0) return message
   const title = message.slice(at).match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]

@@ -25,6 +25,15 @@ Deno.test('readableError: a page cut off before its title, and one without a pre
   assertEquals(readableError('<html><title>502 Bad\n  Gateway</title></html>'), 'HTML error page (502 Bad Gateway)')
 })
 
+Deno.test('readableError: URLs lose their query string, so the cause after them survives', () => {
+  const codes = Array.from({ length: 30 }, (_, i) => `FID_COND_MRKT_DIV_CODE_${i + 1}=J&FID_INPUT_ISCD_${i + 1}=0101${i}0`).join('&')
+  assertEquals(
+    readableError(`error sending request from 10.32.33.59:49000 for https://openapi.koreainvestment.com:9443/uapi/x/intstock-multprice?${codes} (openapi.koreainvestment.com:9443): client error (SendRequest): connection reset`),
+    'error sending request from 10.32.33.59:49000 for https://openapi.koreainvestment.com:9443/uapi/x/intstock-multprice?… (openapi.koreainvestment.com:9443): client error (SendRequest): connection reset',
+  )
+  assertEquals(readableError('see https://t.me/s/channel for details'), 'see https://t.me/s/channel for details')
+})
+
 Deno.test('readableError: other messages are unchanged', () => {
   for (const m of ['KIS FHKST11300006: HTTP 500 EGW00201 초당 거래건수를 초과하였습니다', 'refused snapshot: 40% missing', '']) {
     assertEquals(readableError(m), m)
