@@ -474,6 +474,22 @@ What was done and why. Oldest first; new entries go at the bottom.
   posts in a public repo). A parser only changes with its code, and those tests run locally then; a source changing
   its format is caught by the ingest validation, which now alerts.
 
+## 2026-11-18 — Requirements baseline
+- **Done:** `docs/requirements.md`: functional requirements mapped to their tests, and non-functional targets
+  (latency by tier, response size, reliability, freshness, ingest runtime, correctness, free-plan capacity, security)
+  with IDs and baselines. **Why:** a fixed bar to check changes against, instead of judging each benchmark by eye.
+- Baselines from production `tool_calls` / `ingest_runs` (11-13 to 11-18) and `bench-results/` (11-17). Samples are
+  small (1–35 calls per tool since the 11-17 changes); re-baseline after a month.
+- Cold latency gets its own targets (PERF-7, PERF-9–11): occasional calls, which is most real usage, always start new
+  workers, and the warm benchmark hides that.
+- **Done:** `scripts/bench_cold.ts` (`deno task bench:cold`), separate from the warm `bench.ts` (shared cases and
+  client in `bench_shared.ts`). It waits 150 s before every call, the first included, round-robin over the cases.
+  **Why:** `bench.ts --pause 150` started round 1 right after the warm-up, so its first scored call was warm, and its
+  cases run back to back, so only one case per run was cold.
+- **Done:** each cold run writes `<run id>-cold.sql`: per case, cold p50/p95 with every call dropped that had a real
+  `tool_call` in the 150 s before it. **Why:** production keeps serving real calls during the run, and the worker
+  next to the database serves all of them; the benchmark can't query the database itself (shared key only).
+
 ## Open
 - Telegram background backfill with a status column, cron resume, and a "still collecting" note in feed/search (8-page
   cap kept).
@@ -481,3 +497,13 @@ What was done and why. Oldest first; new entries go at the bottom.
 - After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,
   shorten the quote's backoff (one request needs little of the per-second budget), pace `kis-ingest`'s burst, or use
   a separate KIS app key for quotes.
+- `get_stock_history` is over budget (requirements SIZE-1, SIZE-2, PERF-1): `days=250` returns up to 68 KB (limit
+  64 KB, p95 target 20 KB), and the production p95 is 1.5 s (target 1 s, n=3). Options: lower the `days` max, drop
+  columns for long ranges, or truncate with a note.
+- krx-ingest runtime (ING-1): max 126 s, p95 112 s, close to the free plan's 150 s Edge Function limit (check the
+  current limit in the Supabase docs). Find where the time goes, or split the batch.
+- `get_telegram_feed` with a short window (PERF-5, PERF-6): the 1h/30-post case has a warm tool p95 of 453 ms and an
+  end-to-end p95 of 1.7 s, worse than the 20h/50-post case. Probably the query plan for a small `since`.
+- `tool_calls` has no retention (CAP-4): add a cleanup next to `pipeline-report`'s 90-day delete of `ingest_runs`.
+- The KIS vs KRX check has no threshold (CORR-1): the report lists mismatches but doesn't flag more than 0.5%.
+- Cold latency is unmeasured (PERF-7, PERF-9–11): run `deno task bench:cold` and fill in requirements.md §2.3.
