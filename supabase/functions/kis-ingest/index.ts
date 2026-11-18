@@ -24,8 +24,8 @@
 // with `x-region: ap-northeast-2` (sql/cron.example.sql), so it runs in Seoul next to KIS; its few database calls
 // cross to the database's region instead. `timings.ran_in` shows where a run ran.
 
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
-import { createClient } from 'npm:@supabase/supabase-js@2'
+import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
+import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { kisGet, kisToken } from '../_shared/kis.ts'
 import { kisSnapshotProblems, parseKisRows, type Prev } from './parse.ts'
 import { monitored, type RunContext } from '../_shared/ops.ts'

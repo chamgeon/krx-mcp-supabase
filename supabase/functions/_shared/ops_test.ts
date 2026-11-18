@@ -1,7 +1,7 @@
 // Unit tests for the ingest run record and alerts (ops.ts): what is stored and said about a run.
 // Run from the repo root: deno task test
 
-import { assertEquals } from 'jsr:@std/assert@1'
+import { assertEquals } from 'jsr:@std/assert@1.0.19'
 import { errorOf, kstTime, summaryOf } from './ops.ts'
 
 Deno.test('errorOf: each ingest function reports failures its own way', () => {

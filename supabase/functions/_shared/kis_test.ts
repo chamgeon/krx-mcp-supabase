@@ -1,8 +1,8 @@
 // Unit tests for KIS response parsing and the session clock.
 // Run from the repo root: deno task test
 
-import { assert, assertEquals } from 'jsr:@std/assert@1'
-import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
+import { assert, assertEquals } from 'jsr:@std/assert@1.0.19'
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0'
 import {
   forgetKisToken,
   isTokenRejected,

@@ -1,7 +1,7 @@
 // Unit tests for region forwarding decisions (forward.ts).
 // Run from the repo root: deno task test
 
-import { assertEquals } from 'jsr:@std/assert@1'
+import { assertEquals } from 'jsr:@std/assert@1.0.19'
 import {
   arrivalHeaders,
   CLIENT_HEADER,

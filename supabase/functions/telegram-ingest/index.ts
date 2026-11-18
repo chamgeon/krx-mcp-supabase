@@ -15,8 +15,8 @@
 // saved progress. A failed backfill page doesn't fail the run (the channel's own poll reports a broken channel); it
 // counts towards the page cap, so retries end.
 
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
-import { createClient } from 'npm:@supabase/supabase-js@2'
+import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
+import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import {
   backfillChannel, type BackfillResult, BACKFILL_STALE_MS, loadStockIndex, stockIndex, syncChannel, tagStocks,
   type SyncResult,

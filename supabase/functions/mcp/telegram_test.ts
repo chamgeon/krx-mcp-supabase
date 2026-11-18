@@ -1,7 +1,7 @@
 // Unit tests for the MCP Telegram tools' helpers.
 // Run from the repo root: deno task test
 
-import { assertEquals, assertThrows } from 'jsr:@std/assert@1'
+import { assertEquals, assertThrows } from 'jsr:@std/assert@1.0.19'
 import { feedChannels, sinceIso } from './telegram.ts'
 
 Deno.test('sinceIso: a bare date means midnight KST', () => {

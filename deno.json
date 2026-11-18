@@ -1,5 +1,5 @@
 {
-  "lock": false,
+  "lock": { "path": "deno.lock", "frozen": true },
   "tasks": {
     "test": "deno test --allow-env --allow-read=supabase supabase/functions",
     "check": "deno check supabase/functions/kis-ingest/index.ts supabase/functions/krx-ingest/index.ts supabase/functions/mcp/index.ts supabase/functions/pipeline-report/index.ts supabase/functions/telegram-ingest/index.ts scripts/bench.ts scripts/bench_cold.ts scripts/fetch_fixtures.ts",

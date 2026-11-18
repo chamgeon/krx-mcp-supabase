@@ -1,7 +1,7 @@
 // Unit tests for Telegram channel names, preview-page parsing and stock tagging. No network: the HTML is inline.
 // Run from the repo root: deno task test
 
-import { assertEquals } from 'jsr:@std/assert@1'
+import { assertEquals } from 'jsr:@std/assert@1.0.19'
 import { buildStockIndex, channelName, pageProblems, parsePage, tagStocks } from './telegram.ts'
 
 Deno.test('channelName normalizes the ways people paste a channel', () => {

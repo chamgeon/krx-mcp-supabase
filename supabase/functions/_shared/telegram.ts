@@ -7,7 +7,7 @@
 // Used by telegram-ingest (scheduled polling) and the MCP tools (add a channel, refresh before reading).
 
 import { parseHTML } from 'npm:linkedom@0.18.5'
-import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { readableError } from './errors.ts'
 
 const UA = 'Mozilla/5.0 (compatible; kr-stock-mcp/1.0; public channel reader)'

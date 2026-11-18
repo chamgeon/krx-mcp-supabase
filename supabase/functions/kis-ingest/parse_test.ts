@@ -3,7 +3,7 @@
 // as kis-ingest takes it from the latest stored day.
 // Run from the repo root: deno task test
 
-import { assert, assertEquals } from 'jsr:@std/assert@1'
+import { assert, assertEquals } from 'jsr:@std/assert@1.0.19'
 import { krxItems, parseKrxRows } from '../krx-ingest/parse.ts'
 import { kisSnapshotProblems, parseKisRows, type Prev } from './parse.ts'
 

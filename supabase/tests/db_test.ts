@@ -7,8 +7,8 @@
 //
 // Never runs against production: the URL must be localhost (these tests insert and delete rows).
 
-import { assert, assertEquals } from 'jsr:@std/assert@1'
-import { createClient } from 'npm:@supabase/supabase-js@2'
+import { assert, assertEquals } from 'jsr:@std/assert@1.0.19'
+import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { analyze, type Row } from '../functions/mcp/analyze.ts'
 import { KILLED_ERROR, monitored, sweepKilled } from '../functions/_shared/ops.ts'
 

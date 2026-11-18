@@ -1,6 +1,6 @@
 // KIS (한국투자증권) Open API client shared by kis-ingest and mcp.
 
-import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0'
 
 const KIS_BASE = 'https://openapi.koreainvestment.com:9443'
 const KIS_APP_KEY = Deno.env.get('KIS_APP_KEY')!

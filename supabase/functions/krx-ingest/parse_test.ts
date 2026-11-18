@@ -3,7 +3,7 @@
 // new fixture that breaks an assumption fails here first.
 // Run from the repo root: deno task test
 
-import { assert, assertEquals } from 'jsr:@std/assert@1'
+import { assert, assertEquals } from 'jsr:@std/assert@1.0.19'
 import { compareKisKrx, krxDayProblems, krxItems, parseKrxRows, type PriceRow } from './parse.ts'
 
 const DAY = '20261113'

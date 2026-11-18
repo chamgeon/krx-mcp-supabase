@@ -1,7 +1,7 @@
 // Unit tests for the daily pipeline report's text (report.ts).
 // Run from the repo root: deno task test
 
-import { assert, assertEquals, assertStringIncludes } from 'jsr:@std/assert@1'
+import { assert, assertEquals, assertStringIncludes } from 'jsr:@std/assert@1.0.19'
 import { buildReport, reportWindowEnd, type Run } from './report.ts'
 
 const END = new Date('2026-11-17T09:00:00Z') // Tue 18:00 KST

@@ -658,8 +658,19 @@ What was done and why. Oldest first; new entries go at the bottom.
   login, so whoever could sign in with Google had full access unless sign-ups were off in the dashboard. Backed up by
   Google's consent screen in Testing with listed test users, and Supabase sign-ups off (README → Login).
 - The `?key=` URL is now the operator's key for scripts and benchmarks, not a transition.
+- **Decided:** rotate `MCP_ACCESS_KEY`, so the key is the operator's alone.
 - README: a "Scope & data" section; `docs/plan.md`: a re-scope note on top, history kept; tool descriptions say "this
   deployment" instead of "all users". The per-user features stay: they're what a small group needs.
+
+## 2026-11-18 — Dependencies pinned, lock file frozen
+- **Done:** every import names an exact version: supabase-js 2.119.0, @modelcontextprotocol/server 2.4.0, zod 4.6.7,
+  jose 5.10.0, @std/assert 1.0.19, and `jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts` (it had no version at
+  all), the versions they resolved to on 11-18. `deno.json` turns the lock file on and freezes it (`deno.lock`,
+  committed): `deno task check`/`test` (and CI) fail if anything would resolve differently. **Why:** with `^` ranges
+  and no lock, each deploy took whatever was newest, and the functions run with the service-role key (jose verifies
+  login tokens); a compromised or broken release would have gone straight to production.
+- To update one: change its version in the imports, run a check with `--frozen=false` to rewrite `deno.lock`, run the
+  tests, commit both.
 
 ## Open
 - After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,

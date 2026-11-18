@@ -8,11 +8,11 @@
 // The operator's key for scripts and benchmarks (no login; keep it private):
 //   https://<project-ref>.supabase.co/functions/v1/mcp?key=<MCP_ACCESS_KEY>
 
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
-import { createMcpHandler, McpServer } from 'npm:@modelcontextprotocol/server@^2.0.0'
-import { createClient } from 'npm:@supabase/supabase-js@2'
-import { z } from 'npm:zod@^4.3.6'
-import { createRemoteJWKSet, jwtVerify } from 'npm:jose@^5.9.6'
+import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
+import { createMcpHandler, McpServer } from 'npm:@modelcontextprotocol/server@2.4.0'
+import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
+import { z } from 'npm:zod@4.6.7'
+import { createRemoteJWKSet, jwtVerify } from 'npm:jose@5.10.0'
 import { isAllowed, parseAllowed } from './allow.ts'
 import {
   forgetKisToken,

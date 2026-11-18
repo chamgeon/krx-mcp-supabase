@@ -5,8 +5,8 @@
 //
 //   POST /functions/v1/pipeline-report   (x-ingest-secret header) -> sends the report; answers { sent, text }
 
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
-import { createClient } from 'npm:@supabase/supabase-js@2'
+import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
+import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { sendTelegram } from '../_shared/ops.ts'
 import { buildReport, reportWindowEnd, type Run } from './report.ts'
 

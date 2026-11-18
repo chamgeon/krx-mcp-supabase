@@ -13,7 +13,7 @@
 // Secrets (supabase secrets set ...): TELEGRAM_BOT_TOKEN (from @BotFather) and TELEGRAM_CHAT_ID (the operator's chat
 // with the bot). Without them nothing is sent; the message is logged instead.
 
-import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { readableError } from './errors.ts'
 
 const ALERT_EVERY_MS = 3600_000

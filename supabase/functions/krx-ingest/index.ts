@@ -13,8 +13,8 @@
 // rows, the KIS comparison read, the upsert, the cleanup) and `ran_in`; the same goes into the running ingest_runs row
 // after each day (run.progress), so a run stopped at the 150 s limit shows how far it got.
 
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
-import { createClient } from 'npm:@supabase/supabase-js@2'
+import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
+import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { compareKisKrx, type KisCheck, krxDayProblems, krxItems, parseKrxRows, type PriceRow, toIsoDate } from './parse.ts'
 import { monitored, type RunContext } from '../_shared/ops.ts'
 

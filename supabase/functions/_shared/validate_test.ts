@@ -2,7 +2,7 @@
 // The real-data versions are in krx-ingest/parse_test.ts and kis-ingest/parse_test.ts.
 // Run from the repo root: deno task test
 
-import { assert, assertEquals } from 'jsr:@std/assert@1'
+import { assert, assertEquals } from 'jsr:@std/assert@1.0.19'
 import { type CheckedRow, rowProblems } from './validate.ts'
 
 // n plausible rows: codes 100000.., close 1,000, ±1% range, a few no-trade rows like KRX sends them

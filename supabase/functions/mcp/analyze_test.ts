@@ -1,7 +1,7 @@
 // Unit tests for analyze_stock's computation and the shared number/date helpers.
 // Run from the repo root: deno task test
 
-import { assert, assertAlmostEquals, assertEquals } from 'jsr:@std/assert@1'
+import { assert, assertAlmostEquals, assertEquals } from 'jsr:@std/assert@1.0.19'
 import { analyze, eok, mean, normDate, pct, round, type Row, stddev } from './analyze.ts'
 
 // ---- helpers --------------------------------------------------------------------------------------

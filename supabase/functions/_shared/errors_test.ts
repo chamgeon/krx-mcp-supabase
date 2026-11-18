@@ -1,6 +1,6 @@
 // Run from the repo root: deno task test
 
-import { assertEquals } from 'jsr:@std/assert@1'
+import { assertEquals } from 'jsr:@std/assert@1.0.19'
 import { readableError } from './errors.ts'
 
 // The start of the page Cloudflare returned for an upsert on 2026-11-18 (telegram-ingest, insidertracking)

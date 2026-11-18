@@ -10,9 +10,9 @@
 // gets a past date (no live quote), seeded channels are never stale, and add_telegram_channel is only called with an
 // invalid name.
 
-import { assert, assertEquals, assertStringIncludes } from 'jsr:@std/assert@1'
+import { assert, assertEquals, assertStringIncludes } from 'jsr:@std/assert@1.0.19'
 import { Client, StreamableHTTPClientTransport } from 'npm:@modelcontextprotocol/client@2.4.0'
-import { createClient } from 'npm:@supabase/supabase-js@2'
+import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 
 const BASE = Deno.env.get('LOCAL_SUPABASE_URL') ?? 'http://127.0.0.1:54321'
 if (!/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(BASE)) throw new Error(`refusing to run MCP tests against ${BASE}`)
@@ -440,9 +440,11 @@ test('add_telegram_channel: invalid name is refused without fetching', async () 
   assertStringIncludes((await call('add_telegram_channel', { channel: 'bad-name' })).error, 'Not a valid Telegram channel name')
 })
 
-test('channel preferences need a logged-in user', async () => {
+test('channel preferences need a user account, and the message does not send anyone to log in', async () => {
   for (const [tool, args] of [['get_my_channels', {}], ['set_my_channels', { channels: [] }], ['update_my_channels', {}]] as const) {
-    assertStringIncludes((await call(tool, args)).error, 'logged-in user', tool)
+    const { error } = await call(tool, args)
+    assertStringIncludes(error, 'no user account', tool)
+    assert(!/log ?in|sign in/i.test(error), `${tool}: ${error}`)
   }
 })
 

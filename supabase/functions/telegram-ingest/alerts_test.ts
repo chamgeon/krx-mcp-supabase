@@ -1,7 +1,7 @@
 // Unit tests for the Telegram channel alerts (alerts.ts).
 // Run from the repo root: deno task test
 
-import { assertEquals } from 'jsr:@std/assert@1'
+import { assertEquals } from 'jsr:@std/assert@1.0.19'
 import type { SyncResult } from '../_shared/telegram.ts'
 import { channelAlerts } from './alerts.ts'
 

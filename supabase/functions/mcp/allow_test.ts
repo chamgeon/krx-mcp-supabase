@@ -1,6 +1,6 @@
 // Run from the repo root: deno task test
 
-import { assert, assertEquals } from 'jsr:@std/assert@1'
+import { assert, assertEquals } from 'jsr:@std/assert@1.0.19'
 import { isAllowed, parseAllowed } from './allow.ts'
 
 const ID = '687ee4bc-396c-4f37-9c68-6778ebd91d2c'

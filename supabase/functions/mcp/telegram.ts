@@ -1,9 +1,9 @@
 // MCP tools for public Telegram channels: add a channel on request, list channels, read a feed, search posts.
 // Collection lives in ../_shared/telegram.ts; scheduled polling in ../telegram-ingest.
 
-import type { McpServer } from 'npm:@modelcontextprotocol/server@^2.0.0'
-import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
-import { z } from 'npm:zod@^4.3.6'
+import type { McpServer } from 'npm:@modelcontextprotocol/server@2.4.0'
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0'
+import { z } from 'npm:zod@4.6.7'
 import {
   BACKFILL_DAYS, BACKFILL_MAX_PAGES, backfillChannel, channelName, fetchPage, stockIndex, syncChannel, type TgPage,
 } from '../_shared/telegram.ts'
@@ -214,7 +214,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
         channel: name,
         title: ch?.title ?? null,
         status: r.status,
-        ...(followed ? { followed_by_you: true } : { note: 'Log in (OAuth) to follow channels; the shared URL has no user.' }),
+        ...(followed ? { followed_by_you: true } : { note: 'Collected for everyone on this deployment. Following channels is not available on this connection, so it shows up in the feed of all channels.' }),
         posts_stored: count ?? 0,
         ...(r.backfilling
           ? { backfill: `collecting older posts (about ${BACKFILL_DAYS} days) in the background; usually under a minute` }
@@ -226,9 +226,11 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
 
   // ---- Per-user channel preferences (user_channels) ----
 
+  // For a connection without a user (the operator's ?key= URL). Says what works instead, and doesn't send anyone to
+  // the login page: someone given that URL may not be on ALLOWED_USERS.
   const LOGIN_REQUIRED = {
-    error: 'Channel preferences need a logged-in user. This connection uses the shared ?key= URL; reconnect with ' +
-      'the plain MCP URL and sign in with Google.',
+    error: 'Channel preferences are not available on this connection, because it has no user account. ' +
+      'get_telegram_feed shows every collected channel instead; pass channel=<name> to read one channel.',
   }
 
   async function follow(names: string[]): Promise<boolean> {

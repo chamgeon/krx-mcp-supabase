@@ -16,7 +16,6 @@ Function serves it over MCP.
   ([Login](#7-login-oauth)).
 - **The operator is responsible for the data sources' terms** for everyone they let in. KRX's and KIS's terms are
   written for personal use and restrict passing data on to third parties; Telegram posts belong to their channels.
-  Show short excerpts with links, and don't republish them.
 
 ```
 KIS Open API ──(pg_cron, every 5 min + after close)──> kis-ingest ─┐  same day, provisional

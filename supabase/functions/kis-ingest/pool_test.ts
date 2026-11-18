@@ -1,6 +1,6 @@
 // Run from the repo root: deno task test
 
-import { assert, assertEquals, assertRejects } from 'jsr:@std/assert@1'
+import { assert, assertEquals, assertRejects } from 'jsr:@std/assert@1.0.19'
 import { pacedPool } from './pool.ts'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
