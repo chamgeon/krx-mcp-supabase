@@ -320,6 +320,136 @@ Deno.test({
   },
 })
 
+// ---- telegram background backfill (syncChannel + backfillChannel) --------------------------------------------------
+// A fake channel with posts 1–200, one an hour, newest at 2026-11-13T00:00Z; t.me pages are 20 posts, ?before=<id>
+// gives the 20 before it. Every post mentions 900001, so tagging is visible.
+
+import { backfillChannel } from '../functions/_shared/telegram.ts'
+
+const BF = 'testchannel_bf'
+const BF_NEWEST = Date.parse('2026-11-13T00:00:00Z')
+const bfTs = (id: number) => new Date(BF_NEWEST - (200 - id) * 3600_000).toISOString()
+const bfPage = (before?: number) => {
+  const top = Math.min(200, (before ?? 201) - 1)
+  const ids = Array.from({ length: Math.max(0, Math.min(20, top)) }, (_, i) => top - 19 + i).filter((id) => id >= 1)
+  return page(ids.map((id) => `
+<div class="tgme_widget_message" data-post="${BF}/${id}">
+  <div class="tgme_widget_message_bubble">
+    <div class="tgme_widget_message_text">post ${id} 900001</div>
+    <span class="tgme_widget_message_views">10</span>
+    <a class="tgme_widget_message_date"><time datetime="${bfTs(id)}"></time></a>
+  </div>
+</div>`).join(''))
+}
+const bfIndex = () => Promise.resolve(buildStockIndex([{ isu_cd: '900001', isu_nm: '돌파전자' }]))
+
+// Runs fn with t.me/s/testchannel_bf answered by the fake channel (or by `answer`, e.g. a redirect), and the channel
+// row present; removes the channel and its posts afterwards. Returns the pages requested (before= values).
+async function withBfChannel(fn: (requested: (number | null)[]) => Promise<void>, answer?: () => Response) {
+  const requested: (number | null)[] = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input)
+    if (url.startsWith(`https://t.me/s/${BF}`)) {
+      const before = new globalThis.URL(url).searchParams.get('before')
+      requested.push(before ? Number(before) : null)
+      return Promise.resolve(answer ? answer() : new Response(bfPage(before ? Number(before) : undefined), { status: 200 }))
+    }
+    return realFetch(input, init)
+  }) as typeof fetch
+  try {
+    await db.from('telegram_channels').delete().eq('username', BF)
+    const { error } = await db.from('telegram_channels').insert({ username: BF })
+    if (error) throw new Error(error.message)
+    await fn(requested)
+  } finally {
+    globalThis.fetch = realFetch
+    await db.from('telegram_channels').delete().eq('username', BF)
+  }
+}
+
+async function bfState() {
+  const { data } = await db.from('telegram_channels')
+    .select('backfill_before, backfill_oldest_ts, backfill_since, backfill_pages, last_msg_id').eq('username', BF).single()
+  const { data: msgs } = await db.from('telegram_messages').select('msg_id, stock_codes').eq('username', BF).order('msg_id')
+  return { ...data!, ids: (msgs ?? []).map((m) => m.msg_id), msgs: msgs ?? [] }
+}
+
+const bfTest = (name: string, fn: () => Promise<void>) =>
+  Deno.test({ name: `telegram backfill: ${name}`, sanitizeResources: false, sanitizeOps: false, fn })
+
+bfTest('first page only, then the background part stops at the 8-page cap', async () => {
+  await withBfChannel(async (requested) => {
+    const since = '2026-01-01T00:00:00Z' // far back: the page cap ends it
+    const r = await syncChannel(db, BF, bfIndex, { sinceTs: since, maxPages: 1 })
+    assertEquals([r.ok, r.pages, r.new_posts, r.backfill_pending], [true, 1, 20, true], r.error)
+    let s = await bfState()
+    assertEquals([s.backfill_before, s.backfill_pages, s.last_msg_id], [181, 1, 200])
+    assertEquals(new Date(s.backfill_oldest_ts!).toISOString(), bfTs(181))
+    assertEquals(s.ids.length, 20)
+
+    const b = await backfillChannel(db, BF, bfIndex, { pauseMs: 0 })
+    assertEquals([b.ok, b.pages, b.new_posts, b.done], [true, 7, 140, true], b.error)
+    assertEquals(requested, [null, 181, 161, 141, 121, 101, 81, 61])
+    s = await bfState()
+    assertEquals([s.backfill_before, s.backfill_oldest_ts, s.backfill_since, s.backfill_pages], [null, null, null, 8])
+    assertEquals([s.ids.length, s.ids[0], s.ids.at(-1)], [160, 41, 200])
+    assert(s.msgs.every((m) => m.stock_codes.includes('900001')), 'backfilled posts are tagged')
+
+    // Nothing pending any more: a second call fetches nothing
+    const again = await backfillChannel(db, BF, bfIndex, { pauseMs: 0 })
+    assertEquals([again.done, again.pages, requested.length], [true, 0, 8])
+  })
+})
+
+bfTest('stops once posts reach the 30-day mark', async () => {
+  await withBfChannel(async (requested) => {
+    await syncChannel(db, BF, bfIndex, { sinceTs: bfTs(145), maxPages: 1 })
+    const b = await backfillChannel(db, BF, bfIndex, { pauseMs: 0 })
+    assertEquals([b.ok, b.pages, b.done], [true, 2, true], b.error) // 161–180, then 141–160 reaches post 145
+    assertEquals(requested, [null, 181, 161])
+    assertEquals((await bfState()).backfill_before, null)
+  })
+})
+
+bfTest('a first page that already reaches the 30-day mark leaves no backfill', async () => {
+  await withBfChannel(async (requested) => {
+    const r = await syncChannel(db, BF, bfIndex, { sinceTs: bfTs(190), maxPages: 1 }) // posts 181–200 reach post 190
+    assertEquals([r.ok, r.backfill_pending], [true, undefined], r.error)
+    assertEquals((await bfState()).backfill_before, null)
+    assertEquals(requested, [null])
+  })
+})
+
+bfTest('resume claims only a stalled backfill, and continues from saved progress', async () => {
+  await withBfChannel(async (requested) => {
+    await syncChannel(db, BF, bfIndex, { sinceTs: '2026-01-01T00:00:00Z', maxPages: 1 })
+    // Just started (backfill_at = now): the background job owns it
+    const busy = await backfillChannel(db, BF, bfIndex, { resume: true, pauseMs: 0 })
+    assertEquals([busy.pages, busy.skipped], [0, 'no stalled backfill (done, or still running)'])
+    // Interrupted after 3 pages in all: idle for 10 minutes, next page before post 141
+    await db.from('telegram_channels')
+      .update({ backfill_before: 141, backfill_pages: 3, backfill_at: new Date(Date.now() - 600_000).toISOString() })
+      .eq('username', BF)
+    const r = await backfillChannel(db, BF, bfIndex, { resume: true, pauseMs: 0 })
+    assertEquals([r.ok, r.pages, r.done], [true, 5, true], r.error)
+    assertEquals(requested.slice(1), [141, 121, 101, 81, 61])
+  })
+})
+
+bfTest('a failing page keeps the backfill pending but counts towards the cap', async () => {
+  let fail = false
+  await withBfChannel(async () => {
+    await syncChannel(db, BF, bfIndex, { sinceTs: '2026-01-01T00:00:00Z', maxPages: 1 })
+    fail = true
+    const r = await backfillChannel(db, BF, bfIndex, { pauseMs: 0 })
+    assertEquals([r.ok, r.pages, r.done], [false, 1, false])
+    assert(r.error?.includes('no public preview'), r.error)
+    const s = await bfState()
+    assertEquals([s.backfill_before, s.backfill_pages], [181, 2])
+  }, () => fail ? new Response(null, { status: 302, headers: { location: `https://t.me/${BF}` } }) : new Response(bfPage(), { status: 200 }))
+})
+
 // ---- ingest run record and failure alerts (functions/_shared/ops.ts) --------------------------------------------
 
 // Runs `monitored` against the local DB with Telegram's API stubbed (only api.telegram.org; the DB client keeps the

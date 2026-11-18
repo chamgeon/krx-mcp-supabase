@@ -334,6 +334,37 @@ test('search_telegram: every word must match', async () => {
   assertStringIncludes(both.posts[0].text, 'HBM')
 })
 
+test('feed and search say when a channel is still filling, only if the window needs older posts', async () => {
+  // testchannel_b as if just added: posts from 11-12 00:00 UTC stored, older ones still being collected
+  const pending = { backfill_before: 1, backfill_oldest_ts: '2026-11-12T00:00:00Z', backfill_since: '2026-10-13T00:00:00Z' }
+  const { error } = await admin.from('telegram_channels').update(pending).eq('username', 'testchannel_b')
+  if (error) throw new Error(error.message)
+  try {
+    const feed = await call('get_telegram_feed', { all_channels: true, since: '2026-11-01' })
+    assertEquals(feed.still_collecting, [{ channel: 'testchannel_b', collected_from: '2026-11-12 09:00 KST' }])
+    assertStringIncludes(feed.still_collecting_note, 'still being collected')
+    assertEquals(feed.count, 3) // the stored posts are still returned
+
+    // A window inside what's stored, or another channel: no note
+    assertEquals((await call('get_telegram_feed', { all_channels: true, since: '2026-11-13' })).still_collecting, undefined)
+    assertEquals((await call('get_telegram_feed', { channel: 'testchannel_a', since: '2026-11-01' })).still_collecting, undefined)
+
+    const one = await call('get_telegram_feed', { channel: 'testchannel_b', since: '2026-11-01' })
+    assertEquals(one.still_collecting?.map((c: Json) => c.channel), ['testchannel_b'])
+
+    const search = await call('search_telegram', { query: 'HBM', since: '2026-11-01' })
+    assertEquals(search.still_collecting?.map((c: Json) => c.channel), ['testchannel_b'])
+    assertEquals((await call('search_telegram', { query: 'HBM', channel: 'testchannel_a', since: '2026-11-01' })).still_collecting, undefined)
+
+    const list = await call('list_telegram_channels')
+    assertEquals(list.find((c: Json) => c.channel === 'testchannel_b').collecting_older_posts, true)
+    assertEquals(list.find((c: Json) => c.channel === 'testchannel_a').collecting_older_posts, undefined)
+  } finally {
+    await admin.from('telegram_channels')
+      .update({ backfill_before: null, backfill_oldest_ts: null, backfill_since: null }).eq('username', 'testchannel_b')
+  }
+})
+
 test('add_telegram_channel: invalid name is refused without fetching', async () => {
   assertStringIncludes((await call('add_telegram_channel', { channel: 'bad-name' })).error, 'Not a valid Telegram channel name')
 })

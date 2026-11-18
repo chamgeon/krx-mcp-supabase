@@ -490,9 +490,43 @@ What was done and why. Oldest first; new entries go at the bottom.
   `tool_call` in the 150 s before it. **Why:** production keeps serving real calls during the run, and the worker
   next to the database serves all of them; the benchmark can't query the database itself (shared key only).
 
+## 2026-11-18 — Telegram background backfill
+- **Done:** adding a channel (`add_telegram_channel`, and `set_/update_my_channels` for channels not collected yet)
+  stores only the newest page and answers; the rest of the history (8 pages / 30 days, whichever first, as decided
+  11-16) is fetched after the response (`backfillChannel` in `_shared/telegram.ts`, via `EdgeRuntime.waitUntil`).
+  Several new channels are backfilled one after another, not in parallel. **Why:** following a new channel took
+  8–21 s, almost all of it the backfill's pages (~0.8 s pause + fetch each); the first page alone proves the channel is
+  public and holds the newest posts.
+- The page fetched for the public-preview check is reused as the first page (`syncChannel`'s `firstPage`), so a new
+  channel costs one t.me request before the answer, not two.
+- Progress lives on the channel (`backfill_before`, `backfill_oldest_ts`, `backfill_since`, `backfill_pages`,
+  `backfill_at`; migration `20261118000001`) and is saved after every page. `telegram-ingest` resumes a backfill with
+  no progress for 3 minutes (its worker ended: free-plan workers live at most 150 s), claiming it first so it never
+  runs alongside a background backfill that is still going. Only for channels whose poll works; a failed page counts
+  towards the 8-page cap, so retries end. Backfill results go into the run's answer (`backfills`), not its status: a
+  broken channel already fails its own poll.
+- **Done:** `get_telegram_feed` and `search_telegram` add `still_collecting` (channel, time collected from) and a note
+  when a channel in scope is still backfilling *and* the requested window starts before its oldest stored post; a
+  window inside what's stored gets no note. One more query, run alongside the posts query. `list_telegram_channels`
+  and `get_my_channels` show `collecting_older_posts`.
+- Reactivating an inactive channel still catches up in the request (up to 8 pages of newer posts: a gap, not a
+  backfill). Nothing sets `active = false` yet.
+- Tests: DB tests run the real sync and backfill against a fake 200-post channel (first page only, the 8-page cap,
+  stopping at the 30-day mark, no backfill when the first page reaches it, the resume claim, a failing page); an MCP
+  test for when the note appears. Not tested: the `waitUntil` hand-off itself (needs a real t.me channel on the
+  deployed function).
+
+- **Checked in production** (11:52 KST, `HANAStrategy`): `add_telegram_channel` took 1,991 ms on the server (+390 ms
+  forward from us-east-1), against 13.6–21.6 s before; PERF-3 (≤ 5 s) met, n=1. From the row timestamps: ~1.3 s
+  lookup, count, t.me page and insert; ~0.4 s storing the page; ~0.3 s follow and reading back; ~300 ms of it the new
+  worker's first database connection (`latest_trading_day` 296 ms). The background backfill fetched 3 more pages
+  (4 in all) and finished 5 s after the add, stopping at the 30-day mark (73 posts); no resume needed.
+- **Done:** the add path records its steps (`channel_lookup`, `channel_count`, `tg_fetch_page`, `channel_insert`,
+  `channel_reactivate`, `tg_sync`, then `follow` ∥ `channel_title` ∥ `posts_count` ∥ `latest_posts`), so the next add
+  shows the split in `tool_calls.timings` instead of being reconstructed from timestamps. `set_/update_my_channels`
+  get the same steps through `ensureChannel`.
+
 ## Open
-- Telegram background backfill with a status column, cron resume, and a "still collecting" note in feed/search (8-page
-  cap kept).
 - Telegram tagging matches only 6-digit codes, so the 96 alphanumeric 종목코드 can be tagged by name only.
 - After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,
   shorten the quote's backoff (one request needs little of the per-second budget), pace `kis-ingest`'s burst, or use

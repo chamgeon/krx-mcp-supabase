@@ -52,11 +52,12 @@ column points at the test that proves it, or is empty where none exists yet.
 
 | ID | P | Requirement | Acceptance test |
 |---|---|---|---|
-| FR-TG-1 | M | `add_telegram_channel` accepts only public channels with a `t.me/s/<name>` preview, backfills ~30 days and returns the latest posts. | mcp_test: "add_telegram_channel: invalid name is refused" (backfill untested) |
+| FR-TG-1 | M | `add_telegram_channel` accepts only public channels with a `t.me/s/<name>` preview, stores the newest page and returns the latest posts; the rest of ~30 days (at most 8 pages in all) is collected in the background, and resumed by `telegram-ingest` if interrupted. | mcp_test: "add_telegram_channel: invalid name is refused"; db_test: "telegram backfill: …" (5 tests) |
 | FR-TG-2 | M | `get_telegram_feed` returns the user's followed channels (or all, with `all_channels`), newest first, with links and the stocks each post mentions. | mcp_test: "get_telegram_feed: all channels, by channel, by stock" |
 | FR-TG-3 | M | `search_telegram` returns posts containing all query words, with a snippet and link. | mcp_test: "search_telegram: every word must match" |
 | FR-TG-4 | M | `set_my_channels` / `update_my_channels` collect channels that aren't collected yet before following them. | mcp_test: "channel preferences: set, update, feed scope" |
 | FR-TG-5 | M | A user's followed channels are visible and editable only by that user. | mcp_test: "channel preferences need a logged-in user" |
+| FR-TG-6 | M | While a channel's older posts are still being collected, `get_telegram_feed` and `search_telegram` say so (`still_collecting`, with the time collected from) when the requested window starts before that time, and only then. | mcp_test: "feed and search say when a channel is still filling" |
 
 ### Data pipeline
 
@@ -86,7 +87,7 @@ Tools fall into three tiers by the work they do.
 |---|---|---|---|---|
 | PERF-1 | M | Tier A server latency p95 ≤ 1,000 ms, p99 ≤ 2,000 ms | feed p95 589 (n=35), movers 503 (n=9), search 387, history **1,504** (n=3) | ⚠️ history |
 | PERF-2 | M | Tier B server latency p95 ≤ 2,000 ms, p99 ≤ 4,000 ms | analyze p95 1,881 (n=4), screen 1,550 (n=1) | ✅ (thin data) |
-| PERF-3 | S | Tier C server latency p95 ≤ 25 s, and always below the Edge Function wall-clock limit | add_channel 20.3 s max (n=2), update 21.6 s max (n=3) | ✅ (thin data) |
+| PERF-3 | S | Tier C server latency p95 ≤ 5 s per new channel (one t.me page; the rest in the background), and always below the Edge Function wall-clock limit | 11-18 with the background backfill: add_channel 1,991 ms (n=1; before: 13.6–21.6 s) | ✅ (n=1) |
 | PERF-4 | S | Tier C calls that touch only already-collected channels meet the Tier A target | not separated in logs yet | ❔ |
 
 ### 2.2 Performance: warm (`scripts/bench.ts`, default pause, client in us-east-1)

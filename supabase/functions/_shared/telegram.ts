@@ -12,6 +12,13 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 const UA = 'Mozilla/5.0 (compatible; kr-stock-mcp/1.0; public channel reader)'
 const PAGE_PAUSE_MS = 800
 
+// A new channel's history: ~30 days or 8 pages (20 posts each), whichever comes first (log 2026-11-16). The first page
+// is fetched while the user waits; the rest in the background (backfillChannel).
+export const BACKFILL_DAYS = 30
+export const BACKFILL_MAX_PAGES = 8
+// A pending backfill with no progress for this long was interrupted (its worker ended): telegram-ingest resumes it
+export const BACKFILL_STALE_MS = 3 * 60_000
+
 export type TgPost = {
   msg_id: number
   ts: string
@@ -208,18 +215,58 @@ export function tagStocks(text: string, idx: StockIndex): string[] {
 
 // ---- Sync ----
 
-export type SyncResult = { channel: string; ok: boolean; new_posts: number; pages: number; error?: string }
+export type SyncResult = {
+  channel: string
+  ok: boolean
+  new_posts: number
+  pages: number
+  error?: string
+  backfill_pending?: boolean // a first sync stopped at maxPages before sinceTs: backfillChannel fetches the rest
+}
+
+/**
+ * Stores posts from one page. `fresh` posts are new to us and get stock tags (the stock index is only loaded when
+ * there are any). `seen` posts only get views/text refreshed: leaving stock_codes out of the upsert keeps their tags,
+ * and a post that parses empty now (format change, or a caption-less edit) keeps its stored text.
+ */
+async function storePosts(
+  supabase: SupabaseClient,
+  channel: string,
+  fresh: TgPost[],
+  seen: TgPost[],
+  getIndex: () => Promise<StockIndex>,
+) {
+  if (fresh.length) {
+    const idx = await getIndex()
+    const rows = fresh.map((p) => ({ username: channel, ...p, stock_codes: tagStocks(p.text, idx) }))
+    const { error } = await supabase.from('telegram_messages').upsert(rows, { onConflict: 'username,msg_id' })
+    if (error) throw new Error(`save posts: ${error.message}`)
+  }
+  const withText = seen.filter((p) => p.text).map((p) => ({ username: channel, ...p }))
+  const noText = seen.filter((p) => !p.text).map(({ text: _t, ...p }) => ({ username: channel, ...p }))
+  for (const rows of [withText, noText]) {
+    if (!rows.length) continue
+    const { error } = await supabase.from('telegram_messages').upsert(rows, { onConflict: 'username,msg_id' })
+    if (error) throw new Error(`update posts: ${error.message}`)
+  }
+}
+
+const oldestOf = (posts: TgPost[]) => posts.reduce((a, p) => (p.msg_id < a.msg_id ? p : a))
 
 /**
  * Fetches a channel's newest page and, if there's a gap since the last poll, earlier pages until it reaches posts we
  * already have (or `sinceTs` for a first backfill), up to `maxPages`. Upserts the posts (views change over time) and
  * updates the channel's poll state.
+ *
+ * A first sync (no posts yet) with `sinceTs` that stops at `maxPages` before reaching it records a pending backfill
+ * (backfill_* columns), for backfillChannel to continue from the oldest post fetched. `firstPage`: the newest page,
+ * when the caller already fetched it (add_telegram_channel's public-preview check), so it isn't fetched twice.
  */
 export async function syncChannel(
   supabase: SupabaseClient,
   channel: string,
   getIndex: () => Promise<StockIndex>,
-  opts: { sinceTs?: string; maxPages?: number } = {},
+  opts: { sinceTs?: string; maxPages?: number; firstPage?: TgPage } = {},
 ): Promise<SyncResult> {
   const maxPages = opts.maxPages ?? 5
   const { data: ch } = await supabase.from('telegram_channels').select('last_msg_id').eq('username', channel).single()
@@ -229,10 +276,16 @@ export async function syncChannel(
   let newPosts = 0
   let before: number | undefined
   let title: string | null = null
+  let oldest: TgPost | null = null
+  let complete = false // stopped because it reached known posts, sinceTs or the channel's first post (not maxPages)
   try {
     while (pages < maxPages) {
-      if (pages > 0) await sleep(PAGE_PAUSE_MS)
-      const page = await fetchPage(channel, before)
+      let page: TgPage | null
+      if (pages === 0 && opts.firstPage) page = opts.firstPage
+      else {
+        if (pages > 0) await sleep(PAGE_PAUSE_MS)
+        page = await fetchPage(channel, before)
+      }
       pages++
       if (!page) throw new Error('no public preview (channel missing, private, or preview turned off)')
       title ??= page.title
@@ -240,42 +293,35 @@ export async function syncChannel(
       if (page.posts.length === 0 && pages === 1 && known > 0) {
         throw new Error('no posts parsed on the newest page, but the channel had posts before (page format changed?)')
       }
-      if (page.posts.length === 0) break
-      // New posts are tagged (the stock index is only loaded when there are any). Posts we already have just get
-      // their views/text refreshed: leaving stock_codes out of the upsert keeps their existing tags.
+      if (page.posts.length === 0) { complete = true; break }
       const fresh = page.posts.filter((p) => p.msg_id > known)
-      const seen = page.posts.filter((p) => p.msg_id <= known)
-      if (fresh.length) {
-        const idx = await getIndex()
-        const rows = fresh.map((p) => ({ username: channel, ...p, stock_codes: tagStocks(p.text, idx) }))
-        const { error } = await supabase.from('telegram_messages').upsert(rows, { onConflict: 'username,msg_id' })
-        if (error) throw new Error(`save posts: ${error.message}`)
-      }
-      // Never replace stored text with empty text: a post that parses empty now (format change, or a caption-less
-      // edit) keeps what we have, and only its views etc. are refreshed
-      const withText = seen.filter((p) => p.text).map((p) => ({ username: channel, ...p }))
-      const noText = seen.filter((p) => !p.text).map(({ text: _t, ...p }) => ({ username: channel, ...p }))
-      for (const rows of [withText, noText]) {
-        if (!rows.length) continue
-        const { error } = await supabase.from('telegram_messages').upsert(rows, { onConflict: 'username,msg_id' })
-        if (error) throw new Error(`update posts: ${error.message}`)
-      }
-      newPosts += page.posts.filter((p) => p.msg_id > known).length
+      await storePosts(supabase, channel, fresh, page.posts.filter((p) => p.msg_id <= known), getIndex)
+      newPosts += fresh.length
       newest = Math.max(newest, ...page.posts.map((p) => p.msg_id))
-      const oldest = page.posts.reduce((a, p) => (p.msg_id < a.msg_id ? p : a))
+      oldest = oldestOf(page.posts)
       const reachedKnown = known > 0 && oldest.msg_id <= known
       const reachedSince = !known && (!opts.sinceTs || oldest.ts <= opts.sinceTs)
-      if (reachedKnown || reachedSince || oldest.msg_id <= 1) break
+      if (reachedKnown || reachedSince || oldest.msg_id <= 1) { complete = true; break }
       before = oldest.msg_id
     }
+    const backfill = !known && !!opts.sinceTs && !complete && oldest != null
     await supabase.from('telegram_channels').update({
       ...(title ? { title } : {}),
       last_msg_id: newest || null,
       last_polled_at: new Date().toISOString(),
       last_error: null,
       poll_errors: 0,
+      ...(backfill
+        ? {
+          backfill_before: oldest!.msg_id,
+          backfill_oldest_ts: oldest!.ts,
+          backfill_since: opts.sinceTs,
+          backfill_pages: pages,
+          backfill_at: new Date().toISOString(),
+        }
+        : {}),
     }).eq('username', channel)
-    return { channel, ok: true, new_posts: newPosts, pages }
+    return { channel, ok: true, new_posts: newPosts, pages, ...(backfill ? { backfill_pending: true } : {}) }
   } catch (e) {
     const msg = (e as Error).message
     const { data: cur } = await supabase.from('telegram_channels').select('poll_errors').eq('username', channel).single()
@@ -285,5 +331,92 @@ export async function syncChannel(
       poll_errors: (cur?.poll_errors ?? 0) + 1,
     }).eq('username', channel)
     return { channel, ok: false, new_posts: newPosts, pages, error: msg }
+  }
+}
+
+// ---- Backfill ----
+
+export type BackfillResult = {
+  channel: string
+  ok: boolean
+  pages: number // fetched in this call
+  new_posts: number
+  done: boolean // nothing left to backfill (or nothing was pending)
+  skipped?: string // not run: why
+  error?: string
+}
+
+const DONE = { backfill_before: null, backfill_oldest_ts: null, backfill_since: null }
+
+/**
+ * Continues a channel's pending backfill (recorded by syncChannel): pages of older posts before backfill_before, until
+ * posts reach backfill_since, the channel's first post, or BACKFILL_MAX_PAGES pages in all (the first sync's included).
+ * Progress is saved after every page, so an interrupted backfill resumes where it stopped.
+ *
+ * `resume`: called by telegram-ingest for backfills that may have been interrupted. It first claims the backfill
+ * (no progress for BACKFILL_STALE_MS), so it never runs alongside the background backfill that is still going.
+ * A failed page still counts towards the page cap, so a channel that keeps failing stops being retried.
+ */
+export async function backfillChannel(
+  supabase: SupabaseClient,
+  channel: string,
+  getIndex: () => Promise<StockIndex>,
+  opts: { resume?: boolean; pauseMs?: number } = {},
+): Promise<BackfillResult> {
+  const pauseMs = opts.pauseMs ?? PAGE_PAUSE_MS
+  const result: BackfillResult = { channel, ok: true, pages: 0, new_posts: 0, done: false }
+  if (opts.resume) {
+    const stale = new Date(Date.now() - BACKFILL_STALE_MS).toISOString()
+    const { data: claimed, error } = await supabase.from('telegram_channels')
+      .update({ backfill_at: new Date().toISOString() })
+      .eq('username', channel).not('backfill_before', 'is', null).or(`backfill_at.is.null,backfill_at.lt.${stale}`)
+      .select('username')
+    if (error) return { ...result, ok: false, error: error.message }
+    if (!claimed?.length) return { ...result, skipped: 'no stalled backfill (done, or still running)' }
+  }
+  const { data: st, error: stErr } = await supabase.from('telegram_channels')
+    .select('backfill_before, backfill_since, backfill_pages').eq('username', channel).single()
+  if (stErr) return { ...result, ok: false, error: stErr.message }
+  if (st.backfill_before == null) return { ...result, done: true, skipped: 'no backfill pending' }
+
+  let before: number = st.backfill_before
+  let pages: number = st.backfill_pages
+  const finish = async (fields: Record<string, unknown>) => {
+    const { error } = await supabase.from('telegram_channels')
+      .update({ ...fields, backfill_pages: pages, backfill_at: new Date().toISOString() }).eq('username', channel)
+    if (error) throw new Error(`save backfill state: ${error.message}`)
+  }
+  try {
+    while (pages < BACKFILL_MAX_PAGES) {
+      await sleep(pauseMs) // polite: the previous page (the first sync's, or this loop's) was just fetched
+      pages++
+      result.pages++
+      const page = await fetchPage(channel, before)
+      if (!page) throw new Error('no public preview (channel missing, private, or preview turned off)')
+      if (page.posts.length === 0) {
+        await finish(DONE)
+        return { ...result, done: true }
+      }
+      // These are older than anything stored, so all are tagged; a page fetched again after an interruption just
+      // gets the same tags again
+      await storePosts(supabase, channel, page.posts, [], getIndex)
+      result.new_posts += page.posts.length
+      const oldest = oldestOf(page.posts)
+      // As dates: post times are t.me's datetime attribute, backfill_since is Postgres's rendering
+      if (Date.parse(oldest.ts) <= Date.parse(st.backfill_since) || oldest.msg_id <= 1) {
+        await finish(DONE)
+        return { ...result, done: true }
+      }
+      before = oldest.msg_id
+      await finish({ backfill_before: before, backfill_oldest_ts: oldest.ts })
+    }
+    await finish(DONE) // page cap: a busy channel keeps less than 30 days
+    return { ...result, done: true }
+  } catch (e) {
+    const msg = (e as Error).message
+    try {
+      await finish(pages >= BACKFILL_MAX_PAGES ? DONE : {})
+    } catch { /* the state is saved after every page; at worst this page is retried */ }
+    return { ...result, ok: false, done: pages >= BACKFILL_MAX_PAGES, error: msg }
   }
 }

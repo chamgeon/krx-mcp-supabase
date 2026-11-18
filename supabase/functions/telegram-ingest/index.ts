@@ -9,10 +9,18 @@
 //
 // Channels that keep failing (e.g. the owner turned the preview off) are retried at most hourly. Returns 500 when any
 // channel fails, so failures show up in the function logs.
+//
+// After polling, it resumes backfills that stalled: a new channel's older posts are fetched in the background by the
+// MCP function, and if that worker ended midway (no progress for 3 minutes), the backfill continues here from its
+// saved progress. A failed backfill page doesn't fail the run (the channel's own poll reports a broken channel); it
+// counts towards the page cap, so retries end.
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2'
-import { loadStockIndex, stockIndex, syncChannel, tagStocks, type SyncResult } from '../_shared/telegram.ts'
+import {
+  backfillChannel, type BackfillResult, BACKFILL_STALE_MS, loadStockIndex, stockIndex, syncChannel, tagStocks,
+  type SyncResult,
+} from '../_shared/telegram.ts'
 import { monitored, sendTelegram } from '../_shared/ops.ts'
 import { channelAlerts } from './alerts.ts'
 
@@ -82,9 +90,28 @@ Deno.serve(monitored('telegram-ingest', supabase, async (req) => {
   const alert = channelAlerts(new Map(due.map((c) => [c.username, c.poll_errors])), results)
   if (alert) await sendTelegram(alert)
 
+  // Stalled backfills, for channels whose poll works (a failing channel's backfill would fail the same way)
+  const stale = new Date(Date.now() - BACKFILL_STALE_MS).toISOString()
+  let bq = supabase.from('telegram_channels').select('username')
+    .eq('active', true).eq('poll_errors', 0).not('backfill_before', 'is', null).lt('backfill_at', stale)
+  if (only) bq = bq.eq('username', only)
+  const { data: stalled, error: bErr } = await bq
+  if (bErr) return Response.json({ error: bErr.message, results }, { status: 500 })
+  const backfills: BackfillResult[] = []
+  for (const c of stalled ?? []) {
+    await new Promise((r) => setTimeout(r, CHANNEL_PAUSE_MS))
+    backfills.push(await backfillChannel(supabase, c.username, () => stockIndex(supabase), { resume: true }))
+  }
+
   const failed = results.filter((r) => !r.ok)
   return Response.json(
-    { polled: results.length, skipped: (channels?.length ?? 0) - due.length, new_posts: results.reduce((n, r) => n + r.new_posts, 0), results },
+    {
+      polled: results.length,
+      skipped: (channels?.length ?? 0) - due.length,
+      new_posts: results.reduce((n, r) => n + r.new_posts, 0),
+      results,
+      ...(backfills.length ? { backfills } : {}),
+    },
     { status: failed.length ? 500 : 200 },
   )
 }, { alertOn: wholeRunFailed }))
