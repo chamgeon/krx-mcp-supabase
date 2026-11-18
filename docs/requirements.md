@@ -130,10 +130,10 @@ the busy hours (12, 15–16 and 19 KST in `tool_calls`), e.g. before 07:00 or 20
 
 | ID | P | Requirement | Baseline | Status |
 |---|---|---|---|---|
-| PERF-7 | M | Cold end-to-end p95: Tier A ≤ 3,000 ms, Tier B ≤ 4,000 ms | 11-18, 3 Tier A tools, n=4–5: find_stock 2,981, check_available_dates **4,718**, get_daily_movers **4,000** | ⚠️ 2 of 3 over |
-| PERF-9 | S | Cold server latency p95: Tier A ≤ 1,500 ms, Tier B ≤ 2,500 ms | 11-18: find_stock 686, check_available_dates 770, get_daily_movers 572 | ✅ (Tier B unmeasured) |
-| PERF-10 | S | Cold forward hop p95 ≤ 1,500 ms (includes the DB-region worker's start-up) | 11-18: 1,067 / **3,229** / 1,061 (the 3,229 call was at 12:00 KST, during the gateway slowdown) | ⚠️ |
-| PERF-11 | C | Cold penalty (cold p50 − warm p50, end-to-end) ≤ 1,500 ms per tool | 11-18 cold vs 11-17 warm p50: find_stock +2,100, check_available_dates +2,590, get_daily_movers +2,644 | ❌ |
+| PERF-7 | M | Cold end-to-end p95: Tier A ≤ 3,000 ms, Tier B ≤ 4,000 ms | 11-18, all 10 cases, n=4–5: Tier A 2,914–4,718 (2 of 8 within), Tier B 5,585 and 6,482 | ❌ 8 of 10 over |
+| PERF-9 | S | Cold server latency p95: Tier A ≤ 1,500 ms, Tier B ≤ 2,500 ms | 11-18: Tier A 572–1,060; analyze_stock 1,991, screen_stocks **2,511** | ⚠️ screen_stocks just over |
+| PERF-10 | S | Cold forward hop p95 ≤ 1,500 ms (includes the DB-region worker's start-up) | 11-18: 980–1,171 for 7 cases; **2,211** (list_telegram_channels), **2,908** (analyze_stock), **3,229** (check_available_dates, at 12:00 KST during the gateway slowdown) | ⚠️ 3 of 10 over |
+| PERF-11 | C | Cold penalty (cold p50 − warm p50, end-to-end) ≤ 1,500 ms per tool | 11-18 cold vs 11-17 warm p50: +2.1 to +3.5 s for every case (screen_stocks +3.5, analyze_stock +3.35) | ❌ all |
 
 Results (fill in from `bench-results/`). `total` is measured from the benchmark machine in Korea to us-east-1, so it
 includes that trip; `tool` and `fwd` match real calls from Claude:
@@ -142,13 +142,14 @@ includes that trip; `tool` and `fwd` match real calls from Claude:
 |---|---|---|---|---|---|
 | find_stock | A | 20261118T023156Z (5 / 0) | 2,386 / 2,981 | 631 / 686 | 779 / 1,067 |
 | check_available_dates | A | 20261118T025820Z (4 / 1) | 2,881 / 4,718 | 568 / 770 | 969 / 3,229 |
-| get_stock_history (20d) | A | | | | |
+| get_stock_history (20d) | A | 20261118T035717Z (5 / 0) | 2,492 / 3,137 | 687 / 730 | 672 / 1,099 |
 | get_daily_movers (latest) | A | 20261118T032359Z (5 / 0) | 2,941 / 4,000 | 513 / 572 | 715 / 1,061 |
-| get_telegram_feed (1h, 30) | A | | | | |
-| search_telegram (60h, 10) | A | | | | |
-| list_telegram_channels | A | | | | |
-| screen_stocks (spike) | B | | | | |
-| analyze_stock (latest) | B | | | | |
+| get_telegram_feed (1h, 30) | A | 20261118T035717Z (5 / 0) | 2,629 / 2,914 | 595 / 861 | 677 / 1,036 |
+| get_telegram_feed (20h, 50) | A | 20261118T035717Z (5 / 0) | 3,196 / 3,361 | 624 / 1,060 | 1,067 / 1,110 |
+| search_telegram (60h, 10) | A | 20261118T035717Z (5 / 0) | 2,616 / 4,659 | 721 / 846 | 688 / 980 |
+| list_telegram_channels | A | 20261118T035717Z (5 / 0) | 2,880 / 4,140 | 550 / 798 | 1,054 / 2,211 |
+| screen_stocks (spike) | B | 20261118T035717Z (4 / 1) | 4,027 / 5,585 | 2,039 / 2,511 | 638 / 1,171 |
+| analyze_stock (latest) | B | 20261118T035717Z (5 / 0) | 3,805 / 6,482 | 1,443 / 1,991 | 1,113 / 2,908 |
 
 ### 2.4 Response size
 

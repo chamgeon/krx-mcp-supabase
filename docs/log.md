@@ -611,8 +611,42 @@ What was done and why. Oldest first; new entries go at the bottom.
   `ingest_runs.error`.
 - **Done:** KIS pace 10/s → 8/s (KIS phase ~11.6 s), for fewer rate-limit answers and more room for live quotes.
 
+## 2026-11-18 — krx-ingest: timings, markets in parallel, run in Seoul
+- **Found:** today's krx-ingest runs took 20, 27 and 18 s when KRX hadn't published (2–4 KRX calls returning nothing,
+  no writes: ~5 s per call) and 126 s when it loaded 11-17 (2,771 rows), 24 s from the 150 s limit (ING-1).
+  `pg_stat_statements` puts a 1,000-row `daily_prices` upsert at 310 ms mean (3.3 s max), so the 3 upserts explain
+  at most ~10 s: the rest is the KRX calls (two full-day answers) from Mumbai to `data-dbg.krx.co.kr` in Korea.
+  Inferred: the function recorded no timings.
+- **Done:** krx-ingest's answer carries `timings`: `ran_in`, and per day each KRX call's ms, KB and rows, the two
+  calls' wall time, the KIS comparison read, the upsert and the cleanup; saved into the running row after each day.
+  KOSPI and KOSDAQ are fetched in parallel. Its cron job sends `x-region: ap-northeast-2`, like kis-ingest's.
+- Not tested end to end locally (needs KRX); the parsers' tests pass. The next morning's runs (07:00–08:30) will show.
+
+## 2026-11-18 — Telegram tagging: nicknames, codes with letters
+- **Found:** 640 of 720 stored posts have no stock tag, but sampling them shows mostly foreign companies (엔비디아,
+  모건스탠리), macro, crypto and general news, not missed KRX stocks. Nicknames are rare in these channels (삼전 1 post,
+  LG엔솔 1; 하닉, 엘엔솔, 현차, 삼바, 셀트, 카뱅 0); 하이닉스 appears in 58 posts but only 1 lacked the SK하이닉스 tag.
+- **Done:** `STOCK_ALIASES` in `_shared/telegram.ts`: 15 hand-picked nicknames for large caps (삼전, 하닉, 하이닉스,
+  엘엔솔/엘지엔솔/LG엔솔, 현차, 기아차, 삼바, 셀트, 카뱅, 한화에어로, 에코비엠, 두산에너빌, 네이버), codes checked
+  against the stock list. Matched like names (whole words, longest first) and allowed under 3 characters; one whose
+  code isn't listed is ignored. 포스코 left out (several POSCO companies). A list in code, not a table: a handful.
+- **Done:** codes with a letter (96 listed, e.g. 0001A0, 00088K) are tagged like 6-digit ones: any 6-character
+  token of digits and capitals that is a listed code.
+- Foreign stocks (엔비디아 → NVDA) stay untagged: the bigger gap, but a separate list and a decision on `stock=`.
+- Existing posts need `telegram-ingest?retag=1` after deploying (~3 posts mention a nickname; none a lettered code).
+
+## 2026-11-18 — Cold benchmark, all 10 cases
+- `bench:cold` for the other 7 cases (13:00–14:27 KST, in session, 5 calls each; 1 dropped). All 10 cases are now in
+  requirements §2.3. Every tool pays +2.2–3.5 s cold against warm p50: end-to-end p50 2.5–4.0 s cold vs 0.25–0.53 s
+  warm. PERF-7 (cold p95 ≤ 3 s / 4 s) fails for 8 of 10; server-side PERF-9 holds except screen_stocks (2,511 ms).
+- Per step: a new Mumbai worker's first database queries take 0.3–1.2 s (connection setup; parallel first queries all
+  wait it out together, e.g. the 20h feed's three at ~1 s), the forward hop 0.6–1.1 s (up to 2.9 s), and the rest is
+  the us-east-1 worker plus the benchmark machine's own connections.
+- Two tool-specific costs on top: `analyze_stock`'s live KIS quote (0.74–1.18 s from Mumbai, in session), and
+  `screen_stocks`' SQL itself (1.33–1.88 s cold against ~0.25 s warm), which looks like a cold database cache rather
+  than connection setup (its first query, `latest_date`, already paid that). Not checked.
+
 ## Open
-- Telegram tagging matches only 6-digit codes, so the 96 alphanumeric 종목코드 can be tagged by name only.
 - After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,
   shorten the quote's backoff (one request needs little of the per-second budget), pace `kis-ingest`'s burst, or use
   a separate KIS app key for quotes.
@@ -625,7 +659,10 @@ What was done and why. Oldest first; new entries go at the bottom.
   end-to-end p95 of 1.7 s, worse than the 20h/50-post case. Probably the query plan for a small `since`.
 - `tool_calls` has no retention (CAP-4): add a cleanup next to `pipeline-report`'s 90-day delete of `ingest_runs`.
 - The KIS vs KRX check has no threshold (CORR-1): the report lists mismatches but doesn't flag more than 0.5%.
-- Cold latency for the other 7 cases (requirements §2.3): `deno task bench:cold` without `--only` (~2 h), outside
-  busy hours.
+- Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
+  next to the database, every minute) vs. moving the project to us-east-1. Then `screen_stocks`' cold SQL (1.3–1.9 s
+  against ~0.25 s warm): `explain (analyze, buffers)` right after an idle period, to see if it's reading from disk.
 - After deploying kis-ingest's pool and moving its cron jobs to Seoul: check `summary->'timings'` (`ran_in` should be
   `ap-northeast-2`; `kis_wall_ms`, `kis_ms / kis_calls` per call, `rate_limited`) against 11-18's 72–103 s.
+- krx-ingest after moving to Seoul: tomorrow's loading run's `summary->'timings'` (`ran_in`, per-call `ms`/`kb`,
+  `upsert_ms`) against 11-18's 126 s; then update ING-1.

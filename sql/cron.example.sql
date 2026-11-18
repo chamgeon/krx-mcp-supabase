@@ -72,7 +72,8 @@ select cron.schedule(
   $$
   select net.http_post(
     url := 'https://<PROJECT_REF>.supabase.co/functions/v1/krx-ingest',
-    headers := jsonb_build_object('Content-Type', 'application/json', 'x-ingest-secret', '<INGEST_SECRET>'),
+    -- x-region: run in Seoul, next to the KRX API (two large answers per day), not next to the database
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-region', 'ap-northeast-2', 'x-ingest-secret', '<INGEST_SECRET>'),
     body := '{}'::jsonb,
     timeout_milliseconds := 150000
   );

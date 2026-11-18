@@ -165,7 +165,31 @@ export async function loadStockIndex(supabase: SupabaseClient): Promise<StockInd
   return buildStockIndex(stocks)
 }
 
-export function buildStockIndex(stocks: { isu_cd: string; isu_nm: string }[]): StockIndex {
+// Nicknames for a few large caps, matched like names (whole words) and allowed under 3 characters because each was
+// chosen by hand. Checked against the stock list (2026-11-18); an alias whose code isn't listed is ignored. Left out
+// on purpose: 포스코 (several POSCO companies). After changing this list, retag (telegram-ingest?retag=1).
+export const STOCK_ALIASES: [alias: string, code: string][] = [
+  ['삼전', '005930'], // 삼성전자
+  ['하닉', '000660'], // SK하이닉스
+  ['하이닉스', '000660'],
+  ['엘엔솔', '373220'], // LG에너지솔루션
+  ['엘지엔솔', '373220'],
+  ['LG엔솔', '373220'],
+  ['현차', '005380'], // 현대차
+  ['기아차', '000270'], // 기아 (its name until 2021)
+  ['삼바', '207940'], // 삼성바이오로직스
+  ['셀트', '068270'], // 셀트리온
+  ['카뱅', '323410'], // 카카오뱅크
+  ['한화에어로', '012450'], // 한화에어로스페이스
+  ['에코비엠', '247540'], // 에코프로비엠
+  ['두산에너빌', '034020'], // 두산에너빌리티
+  ['네이버', '035420'], // NAVER
+]
+
+export function buildStockIndex(
+  stocks: { isu_cd: string; isu_nm: string }[],
+  aliases: [string, string][] = STOCK_ALIASES,
+): StockIndex {
   const names: [string, string][] = []
   const codes = new Set<string>()
   for (const r of stocks) {
@@ -176,6 +200,7 @@ export function buildStockIndex(stocks: { isu_cd: string; isu_nm: string }[]): S
     const m = r.isu_nm.match(/^([A-Z&]+)(\p{Script=Hangul}.*)$/u)
     if (m) names.push([`${m[1]} ${m[2]}`, r.isu_cd])
   }
+  for (const [alias, code] of aliases) if (codes.has(code)) names.push([alias, code])
   names.sort((a, b) => b[0].length - a[0].length) // longest first, so 삼성전자우 is checked before 삼성전자
   return { names, codes }
 }
@@ -210,7 +235,9 @@ export function tagStocks(text: string, idx: StockIndex): string[] {
       rest = rest.slice(0, i) + ' '.repeat(name.length) + rest.slice(from)
     }
   }
-  for (const m of text.matchAll(/(?<!\d)(\d{6})(?!\d)/g)) if (idx.codes.has(m[1])) found.add(m[1])
+  // Codes: 6 characters, mostly digits, but 96 listed stocks have a letter (0001A0, 00088K). Only listed codes count,
+  // so a 6-letter word like NVIDIA never matches.
+  for (const m of text.matchAll(/(?<![0-9A-Za-z])([0-9A-Z]{6})(?![0-9A-Za-z])/g)) if (idx.codes.has(m[1])) found.add(m[1])
   return [...found]
 }
 

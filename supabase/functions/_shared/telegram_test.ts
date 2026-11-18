@@ -24,7 +24,9 @@ const idx = buildStockIndex([
   { isu_cd: '352820', isu_nm: '하이브' },
   { isu_cd: '001680', isu_nm: '대상' }, // 2 characters: never matched by name
   { isu_cd: '123456', isu_nm: '케이프' },
-])
+  { isu_cd: '0001A0', isu_nm: '덕양에너젠' },
+  { isu_cd: '00088K', isu_nm: '한화3우B' },
+], [['삼전', '005930'], ['하닉', '000660'], ['하이닉스', '000660'], ['카뱅', '323410']]) // 카뱅's code isn't listed here
 
 const tag = (text: string) => tagStocks(text, idx).sort()
 
@@ -60,6 +62,20 @@ Deno.test('6-digit codes: only known codes, only exactly 6 digits', () => {
   assertEquals(tag('005930 매수'), ['005930'])
   assertEquals(tag('999999 매수'), [])
   assertEquals(tag('10059301'), [])
+})
+
+Deno.test('codes with a letter: only listed ones, only as a whole token', () => {
+  assertEquals(tag('0001A0 신규상장'), ['0001A0'])
+  assertEquals(tag('(00088K)'), ['00088K'])
+  assertEquals(tag('NVIDIA 2026Q3A 0001A01 X0001A0'), []) // not listed, or glued to more characters
+})
+
+Deno.test('aliases: whole words like names, short ones allowed, only for listed codes', () => {
+  assertEquals(tag('삼전 하닉 동반 강세'), ['000660', '005930'])
+  assertEquals(tag('삼전이 오르고 하이닉스는'), ['000660', '005930'])
+  assertEquals(tag('SK하이닉스 HBM'), ['000660']) // the full name still wins, once
+  assertEquals(tag('삼전자 매수'), []) // inside a longer word
+  assertEquals(tag('카뱅 상승'), []) // its code isn't in this list
 })
 
 // ---- preview page parsing ---------------------------------------------------------------------------
