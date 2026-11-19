@@ -772,8 +772,25 @@ What was done and why. Oldest first; new entries go at the bottom.
   120 posts gated, 15% noise (18) · 180K in / 12K out tokens ≈ $0.02". No line when no run gated (no key).
 - **Done:** `telegram-ingest?gate=500`: no polling, gates up to 500 ungated posts at once (new calls stop after 100 s,
   inside the 150 s limit). For the posts stored before the gate, instead of draining at 40 per run.
-- To deploy: `ANTHROPIC_API_KEY` secret, `supabase db push`, deploy telegram-ingest, mcp and pipeline-report, then
+- To deploy: `ANTHROPIC_API_KEY` secret, `supabase db push --remote`, deploy telegram-ingest, mcp and pipeline-report, then
   `?gate=500` twice for the stored posts, then add events.
+
+## 2026-11-19 — Telegram events: a window per post, re-gate only on a new event
+- **Found:** `anthropic-ipo` (active_from 11-01) tagged 77 posts back to 10-12, 20 of them before 11-01. Not the manual
+  `?gate=500` calls: the gate offered every active event to every post, whatever the post's date, and the event was
+  added (08:01 UTC) before the backlog was gated (08:02–08:06). The automatic drain would have done the same.
+- **Found:** moving the event's `active_from` to 10-12 reset 1,005 posts (the trigger fired on any change to
+  description or active_from), although all had been gated with the event in the list. Undone: those posts were set
+  gated again (`gated_at = now()` where `gate_version` is set), nothing was re-run.
+- **Done:** an event is offered only to posts inside its window (`active_from` ≤ ts < `active_to`, `eventsAt` in
+  `telegram-ingest/gating.ts`), and only inserting an event re-gates posts: those in its window (migration
+  `20261119000001`). An edit re-tags nothing; reset the posts yourself if it should (README SQL). An ended event
+  applies to the posts of its window if they're ever re-gated. `active_from` is required, by default 7 days before
+  the event is added (a null start meant a 7-day reset but tagging with no start).
+- Noted: a manual `?gate=N` during a scheduled run can gate the same posts twice (08:04–08:05 today). Harmless.
+- **Found:** telegram-ingest failed once (16:58 KST, "column telegram_messages.gated_at does not exist"): the function
+  was deployed before its migration reached production, because the deploy steps given said plain `supabase db push`,
+  which in CLI v3 targets the local stack. The right command is `supabase db push --remote`, now in CLAUDE.md.
 
 ## Open
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
@@ -807,3 +824,12 @@ What was done and why. Oldest first; new entries go at the bottom.
   `live_prices` cleanup.
 - Telegram gate, after deploy: watch the backlog drain (`gate.left` in telegram-ingest's `ingest_runs` summary), the
   failure count, and the first `us_symbols` refresh; spot-check hidden noise with `include_noise: true`.
+- Normalized chunks for Telegram posts (dropped from Phase 2 on 11-19, needed after all): posts stored as clean,
+  non-clipped pieces (a digest split by topic), so a filtered feed returns the relevant part instead of a post's
+  opening. The size problem it would solve, measured on `get_telegram_feed(event: anthropic-ipo)` (77 posts,
+  10-12 → 11-19): at the default `max_chars` 1,500 the answer is ~92,000 characters (~90K tokens); at 600 it's ~42,000,
+  but 30 of the 77 posts mention Anthropic only after their first 600 characters (daily digests where the IPO is one
+  item), so the cut shows the digest's opening. Same for stock filters on digests. `search_telegram` doesn't have it
+  (snippet around the query word), but only matches one spelling (앤스로픽 or Anthropic-only posts drop out). Kept
+  as-is for now. Open: how to split (the formatting differs a lot by channel: headings, bullets, prose), and what the
+  feed counts (posts or chunks).

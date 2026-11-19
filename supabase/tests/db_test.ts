@@ -663,7 +663,20 @@ Deno.test('gate trigger: a page stored again keeps the tags; an edit resets gate
   })
 })
 
-Deno.test('gate: adding an event re-gates the posts from its start', async () => {
+Deno.test('telegram_events: active_from is required, 7 days before by default', async () => {
+  const { data, error } = await db.from('telegram_events').insert({ id: 'test-default', description: 'x' }).select('active_from, created_at').single()
+  if (error) throw new Error(error.message)
+  try {
+    const days = (Date.parse(data.created_at) - Date.parse(data.active_from)) / 86400_000
+    assert(Math.abs(days - 7) < 0.01, `active_from is ${days} days before created_at`)
+    const { error: e } = await db.from('telegram_events').update({ active_from: null }).eq('id', 'test-default')
+    assert(e, 'active_from can be set to null')
+  } finally {
+    await db.from('telegram_events').delete().eq('id', 'test-default')
+  }
+})
+
+Deno.test('gate: adding an event re-gates the posts in its window; editing it does not', async () => {
   const gated = { label: 'market', gate_version: 'v5', gated_at: '2026-11-15T00:00:00Z' }
   await withGatePosts([gatePost(2003, 'a', { ...gated, ts: '2026-11-14T00:00:00Z' }), gatePost(2005, 'b', { ...gated, ts: '2026-10-01T00:00:00Z' })], async () => {
     const { error } = await db.from('telegram_events').insert({ id: 'test-regate', description: 'x', active_from: '2026-11-10T00:00:00Z' })
@@ -671,6 +684,11 @@ Deno.test('gate: adding an event re-gates the posts from its start', async () =>
     try {
       assertEquals((await getPost(2003)).gated_at, null) // after active_from
       assert((await getPost(2005)).gated_at) // before: untouched
+      // an edit (description, dates) re-gates nothing: posts are reset by hand when that's wanted
+      await db.from('telegram_messages').update({ gated_at: '2026-11-15T00:00:00Z' }).eq('username', GATE_CH).eq('msg_id', 2003)
+      await db.from('telegram_events').update({ description: 'y', active_from: '2026-09-01T00:00:00Z' }).eq('id', 'test-regate')
+      assert((await getPost(2003)).gated_at)
+      assert((await getPost(2005)).gated_at)
     } finally {
       await db.from('telegram_events').delete().eq('id', 'test-regate')
     }
@@ -766,4 +784,17 @@ Deno.test('refreshUsSymbols: replaces the list daily, refuses a list that came b
     await db.from('us_symbols').delete().neq('ticker', '')
     await db.from('us_symbols').insert(before!)
   }
+})
+
+Deno.test('eventsAt: an event is offered only to posts inside its window', async () => {
+  const { eventsAt } = await import('../functions/telegram-ingest/gating.ts')
+  const ev = [
+    { id: 'open', description: 'x', active_from: '2026-01-01T00:00:00Z', active_to: null },
+    { id: 'nov', description: 'x', active_from: '2026-11-01T00:00:00Z', active_to: null },
+    { id: 'ended', description: 'x', active_from: '2026-10-01T00:00:00Z', active_to: '2026-10-15T00:00:00Z' },
+  ]
+  const ids = (ts: string) => eventsAt(ev, ts).map((e) => e.id)
+  assertEquals(ids('2026-10-12T00:00:00Z'), ['open', 'ended'])
+  assertEquals(ids('2026-11-19T00:00:00Z'), ['open', 'nov'])
+  assertEquals(ids('2026-10-15T00:00:00Z'), ['open']) // active_to is exclusive
 })

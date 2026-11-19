@@ -1,8 +1,9 @@
 // telegram-ingest's gate step (../_shared/gate.ts): after polling, the newest posts not gated yet (gated_at null) go
 // through the gate, a batch per run, and their label, checked tags and events are written back. That covers new posts,
 // edited ones (a trigger resets gated_at), re-gating after an event is added, and the backfill of older posts, which
-// drains at GATE_BATCH posts per 5-minute run. A failed call leaves the post ungated (shown, name-matching tags) for
-// the next run. Also keeps us_symbols fresh (daily) for the US check and find_us_stock.
+// drains at GATE_BATCH posts per 5-minute run. A failed call leaves the post ungated (shown, untagged) for the next
+// run. An event is offered only to posts inside its window (eventsAt). Two runs at once (a manual ?gate=N during a
+// scheduled run) can take the same posts: harmless, a post is just gated twice. Also keeps us_symbols fresh (daily) for the US check and find_us_stock.
 
 import type Anthropic from 'npm:@anthropic-ai/sdk@1.5.0'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0'
@@ -82,6 +83,19 @@ export async function refreshUsSymbols(supabase: SupabaseClient, fetcher: typeof
 }
 
 // Runs fn over items, n at a time; after `until` (performance.now()) no new item starts. Returns how many started.
+type WindowedEvent = GateEvent & { active_from: string; active_to: string | null }
+
+/**
+ * The events a post can be tagged with: those whose window holds the post's time (active_from ≤ ts < active_to; no
+ * end while active_to is null). So a post from before an event's start is never offered it, whenever it's gated.
+ */
+export function eventsAt(events: WindowedEvent[], ts: string): GateEvent[] {
+  const t = Date.parse(ts)
+  return events
+    .filter((e) => Date.parse(e.active_from) <= t && (!e.active_to || t < Date.parse(e.active_to)))
+    .map(({ id, description }) => ({ id, description }))
+}
+
 async function pool<T>(items: T[], n: number, fn: (x: T) => Promise<void>, until = Infinity) {
   let next = 0
   await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
@@ -101,15 +115,15 @@ export async function gateBatch(supabase: SupabaseClient, client: Anthropic, lim
   if (posts?.length) {
     const [{ stocks, symbols }, ev] = await Promise.all([
       loadLists(supabase),
-      supabase.from('telegram_events').select('id, description').or(`active_to.is.null,active_to.gt.${new Date().toISOString()}`).order('id'),
+      supabase.from('telegram_events').select('id, description, active_from, active_to').order('id'),
     ])
     if (ev.error) throw new Error(ev.error.message)
-    const events = (ev.data ?? []) as GateEvent[]
+    const allEvents = (ev.data ?? []) as WindowedEvent[]
     const check = checker(stocks, symbols)
     const errors: string[] = []
     await pool(posts as GatePost[], GATE_CONCURRENCY, async (p) => {
       try {
-        const a = await askGate(client, p, events)
+        const a = await askGate(client, p, eventsAt(allEvents, p.ts))
         const c = check(a.companies)
         const { error: e } = await supabase.from('telegram_messages').update({
           label: a.label,

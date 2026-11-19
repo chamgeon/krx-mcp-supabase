@@ -150,8 +150,9 @@ this deployment.
 supabase secrets set ANTHROPIC_API_KEY=<Anthropic API key>
 ```
 
-Without it posts are stored and shown, but not labeled or tagged. Events to tag are rows of `telegram_events`; adding
-one re-tags the posts since `active_from` (SQL below).
+Without it posts are stored and shown, but not labeled or tagged. Events to tag are rows of `telegram_events`. An
+event applies only to posts inside its window (`active_from` to `active_to`); adding one re-tags the posts in it
+(SQL below). Editing an event re-tags nothing by itself.
 
 To gate the posts stored before the gate at once (instead of 40 per 5-minute run), call `telegram-ingest?gate=500`
 until its `gate.left` is 0.
@@ -162,12 +163,17 @@ Run in the SQL editor, or `supabase db query --remote "<sql>"`. Re-gating is alw
 gates those posts again, newest first, 40 per run (or at once with `?gate=500`).
 
 ```sql
--- Events: add one (re-tags posts since active_from, or the last 7 days if null); '' is an apostrophe
+-- Events: add one (re-tags the posts in its window; active_from defaults to 7 days before now); '' is an apostrophe
 insert into telegram_events (id, description, active_from)
 values ('anthropic-ipo', 'Anthropic''s IPO (상장): listing, pricing, demand, first trading day, valuation, effect on other stocks', '2026-11-01');
--- change what it covers (re-tags too), end it (tagged posts keep the tag), list with post counts
+-- change what it covers: an edit re-tags nothing, so reset the posts in its window yourself; end it (posts after
+-- active_to aren't offered it; tagged posts keep the tag); list with post counts
 update telegram_events set description = '...' where id = 'anthropic-ipo';
+update telegram_messages set gated_at = null where ts >= (select active_from from telegram_events where id = 'anthropic-ipo');
 update telegram_events set active_to = now() where id = 'anthropic-ipo';
+-- an end in the past: the posts already tagged after it keep the tag (an edit re-gates nothing), so remove it
+update telegram_messages set events = array_remove(events, 'anthropic-ipo')
+where events @> array['anthropic-ipo'] and ts >= (select active_to from telegram_events where id = 'anthropic-ipo');
 select e.id, e.active_from, e.active_to, count(m.msg_id) as posts
 from telegram_events e left join telegram_messages m on m.events @> array[e.id]
 group by e.id order by e.created_at desc;
