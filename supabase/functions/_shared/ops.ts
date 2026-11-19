@@ -56,6 +56,9 @@ export function errorOf(body: unknown): string | null {
     for (const r of b.results as { channel?: string; ok?: boolean; error?: string }[]) {
       if (r?.ok === false) out.push(`${r.channel ?? '?'}: ${r.error ?? 'failed'}`)
     }
+    // and its gate step, when every call failed: { gate: { error } }
+    const gate = b.gate as { error?: unknown } | undefined
+    if (typeof gate?.error === 'string') out.push(gate.error)
   } else if (b.results && typeof b.results === 'object') {
     // krx-ingest: { results: { "20261117": 2789 | "error: …" } }
     for (const [day, r] of Object.entries(b.results)) {

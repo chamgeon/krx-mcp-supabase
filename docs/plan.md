@@ -50,6 +50,47 @@
    - Check whether usage is repeated and weekly.
    - Ask users what they wanted but couldn't get.
 
+## Phase 2: Telegram feed quality (2026-11-19)
+
+Problems seen in the data (14 days, 6 channels, ~90 posts/day):
+- One busy channel (insidertracking, ~83 posts/day) fills a daily reader's feed; fine for an hourly reader.
+- 13% of posts have no text (images, stickers, polls); a few are chatter ("피드 싹 갈아엎는중입니다"). Short posts are
+  mostly real headlines, so length can't be the filter.
+- Long digests (ehdwl's median post is 2,402 chars) are cut by the feed's `max_chars`, which the calling model sets to
+  600–900 in ~40% of calls. Storage keeps the full text.
+
+Dropped for now: splitting posts into sections or chunks (the formatting differs too much between channels for rules
+to hold up).
+
+1. **Experiment, local only (no production tables)**
+   - Export recent posts from production (read-only) to a local file.
+   - A local script runs one Claude Haiku 5.5 call per post, with structured output:
+     - `label`: `market` or `noise`. Noise is defined narrowly (chatter, channel housekeeping, filler); unsure counts
+       as `market`. No importance score: without a rubric it would be arbitrary.
+     - `companies`: name as written, market (KR/US), code or ticker. The script checks every guess: KR against the
+       stock list (code exists and matches the name, else lookup by name), US against the Nasdaq + NYSE symbol list.
+       Rejected guesses stay in the raw output.
+     - `events`: only ids from a hand-written event list (id + one-line description), e.g. Anthropic's IPO.
+   - Posts with no text are labeled noise without an LLM call.
+   - Report: label counts per channel and the noise posts to review; LLM tags vs. today's `stock_codes` (agree, LLM
+     only, old tagger only); events found; rejected guesses; tokens and cost.
+2. **Decide after reviewing the report**
+   - Whether the noise label is trustworthy enough to hide posts.
+   - Whether LLM tags replace the name-matching tagger, or are added to it.
+   - Whether event tagging is worth keeping, and who adds events (operator only, or users).
+3. **Adopted (2026-11-19, prompt v5)**: built as below; the name matcher now lives only in the experiment
+   (scripts/name_matcher.ts).
+   - No tags table: columns on `telegram_messages` (label, KR codes in `stock_codes`, US tickers, events, prompt
+     version, gated_at), filled by telegram-ingest; an event is a `telegram_events` row, and adding one re-tags the
+     posts in its window.
+   - Noise is hidden from the feed and search; `include_noise: true` shows it for review.
+   - US firms: a daily `us_symbols` table from Nasdaq's symbol files (Nasdaq + NYSE). Feed and search take a US ticker;
+     the calling model turns Korean names (엔비디아) into tickers. `resolve_tag` only checks tickers and English names
+     against the symbol list. No alias table built from LLM output: it would keep wrong pairings for good.
+   - Cost at today's volume: ~$0.60/month (Haiku 5.5), plus ~$0.05 per new event's re-tag. Runs in telegram-ingest, so
+     no added latency for users. Needs an Anthropic API key as a Supabase secret; CAP-6 ($0/month) no longer holds.
+   - Still open: the feed's volume problem for daily readers (the gate removes noise but doesn't rank).
+
 ## Backlog (build only on user request)
 
 - Investor flows (수급): foreign, institutional and retail net buying, short selling, margin balance (KIS API)

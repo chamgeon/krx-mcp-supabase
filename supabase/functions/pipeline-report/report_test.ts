@@ -2,7 +2,7 @@
 // Run from the repo root: deno task test
 
 import { assert, assertEquals, assertStringIncludes } from 'jsr:@std/assert@1.0.19'
-import { buildReport, reportWindowEnd, type Run } from './report.ts'
+import { buildReport, gateReport, reportWindowEnd, type Run } from './report.ts'
 
 const END = new Date('2026-11-17T09:00:00Z') // Tue 18:00 KST
 const at = (kst: string) => new Date(`2026-11-17T${kst}:00+09:00`).toISOString()
@@ -78,4 +78,19 @@ Deno.test('jobs that never ran are flagged', () => {
   const text = buildReport({ ...healthy, runs: [kis('15:40')] })
   assertStringIncludes(text, "❌ KRX: krx-ingest didn't run (07:00–08:30)")
   assertStringIncludes(text, "❌ Telegram: telegram-ingest didn't run")
+})
+
+Deno.test('Telegram gate: posts, noise share, tokens and cost over the day; off when no run gated', () => {
+  const run = (gate: unknown, extra: object = {}): Run => ({ ...tg(1), summary: { new_posts: 1, gate, ...extra } })
+  const g = (gated: number, noise: number, left: number, failed = 0) => ({ gated, noise, failed, left, tokens: { input: gated * 1500, output: gated * 100 } })
+  assertEquals(gateReport([tg(1), tg(2)]), null)
+  // 120 posts, 18 noise; 180K in at $0.10/M + 12K out at $0.50/M = $0.024
+  assertEquals(gateReport([run(g(40, 6, 400)), run(g(40, 5, 360)), run(g(40, 7, 320))]),
+    '✅ Telegram gate: 120 posts gated, 15% noise (18), 320 still ungated · 180K in / 12K out tokens ≈ $0.02') // the backlog after the last run
+  assertStringIncludes(gateReport([run(g(38, 3, 0, 2))])!, '⚠️ Telegram gate: 38 posts gated')
+  assertStringIncludes(gateReport([run(g(38, 3, 0, 2))])!, '2 failed calls')
+  assertStringIncludes(gateReport([run(g(10, 1, 0)), run({ error: 'gate: every call failed: 401' })])!, '❌ Telegram gate: 10 posts gated, 10% noise (1), 1 run with every call failing')
+  // in the report, under the polls; a gate-only run (?gate=N) isn't a poll
+  const text = buildReport({ ...healthy, runs: [krx, kis('09:05'), kis('15:40'), kis('16:00'), run(g(2, 0, 0)), run(g(300, 30, 0), { gate_only: true })] })
+  assertStringIncludes(text, '✅ Telegram: 1 poll, 1 new post\n✅ Telegram gate: 302 posts gated, 10% noise (30)')
 })

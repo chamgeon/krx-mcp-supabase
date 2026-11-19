@@ -5,8 +5,9 @@ import type { McpServer } from 'npm:@modelcontextprotocol/server@2.4.0'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { z } from 'npm:zod@4.6.7'
 import {
-  BACKFILL_DAYS, BACKFILL_MAX_PAGES, backfillChannel, channelName, fetchPage, stockIndex, syncChannel, type TgPage,
+  BACKFILL_DAYS, BACKFILL_MAX_PAGES, backfillChannel, channelName, fetchPage, syncChannel, type TgPage,
 } from '../_shared/telegram.ts'
+import { normTicker } from '../_shared/gate.ts'
 import { early, step } from './timing.ts'
 
 const MAX_CHANNELS = 50 // cap on the deployment's collection, so adding channels can't turn it into a crawler
@@ -19,7 +20,7 @@ declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined
 let backfillQueue: Promise<unknown> = Promise.resolve()
 function backfillInBackground(supabase: SupabaseClient, name: string) {
   backfillQueue = backfillQueue
-    .then(() => backfillChannel(supabase, name, () => stockIndex(supabase)))
+    .then(() => backfillChannel(supabase, name))
     .then((r) => { if (!r.ok) console.error(`backfill ${name}: ${r.error}`) })
     .catch((e) => console.error(`backfill ${name}: ${(e as Error).message}`))
   if (typeof EdgeRuntime !== 'undefined') EdgeRuntime.waitUntil(backfillQueue)
@@ -35,9 +36,12 @@ type Msg = {
   has_media: boolean
   links: string[]
   stock_codes: string[]
+  us_tickers: string[]
+  events: string[]
+  label: 'market' | 'noise' | null // set by the gate (telegram-ingest); null = not gated yet
 }
 
-const MSG_COLUMNS = 'username, msg_id, ts, text, views, forwarded_from, has_media, links, stock_codes'
+const MSG_COLUMNS = 'username, msg_id, ts, text, views, forwarded_from, has_media, links, stock_codes, us_tickers, events, label'
 
 // A telegram_feed row: a post plus its channel's counts in the window (the same on every row of a channel)
 type FeedRow = Msg & { is_today: boolean; in_window: number; today: number }
@@ -94,8 +98,19 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     return new Map((data ?? []).map((r) => [r.isu_cd, r.isu_nm]))
   }
 
+  // US ticker → listed name, for the tickers in a result set
+  async function usNames(tickers: string[]): Promise<Map<string, string>> {
+    const uniq = [...new Set(tickers)]
+    if (!uniq.length) return new Map()
+    const { data } = await step('us_names', supabase.from('us_symbols').select('ticker, name').in('ticker', uniq))
+    return new Map((data ?? []).map((r) => [r.ticker, r.name.split(' - ')[0].replace(/ (Common|Ordinary|Class [A-Z]|American Depositary).*$/, '')]))
+  }
+
   async function present(msgs: Msg[], maxChars: number, day: Day, snippetOf?: (m: Msg) => string) {
-    const names = await stockNames(msgs.flatMap((m) => m.stock_codes), day)
+    const [names, us] = await Promise.all([
+      stockNames(msgs.flatMap((m) => m.stock_codes), day),
+      usNames(msgs.flatMap((m) => m.us_tickers ?? [])),
+    ])
     return msgs.map((m) => ({
       channel: m.username,
       time: kst(m.ts),
@@ -105,6 +120,9 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       ...(m.has_media ? { has_media: true } : {}),
       ...(m.links.length ? { links: m.links.slice(0, 5) } : {}),
       ...(m.stock_codes.length ? { stocks: m.stock_codes.map((c) => ({ code: c, name: names.get(c) ?? null })) } : {}),
+      ...(m.us_tickers?.length ? { us_stocks: m.us_tickers.map((t) => ({ ticker: t, name: us.get(t) ?? null })) } : {}),
+      ...(m.events?.length ? { events: m.events } : {}),
+      ...(m.label === 'noise' ? { noise: true } : {}), // only shown with include_noise
       link: `https://t.me/${m.username}/${m.msg_id}`,
     }))
   }
@@ -148,7 +166,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     // added: only the page already fetched, the rest in the background. reactivated: catches up on the gap since it
     // was last polled (newer posts, not a backfill). already collected: a quick refresh.
     const maxPages = status === 'added' ? 1 : status === 'reactivated' ? BACKFILL_MAX_PAGES : 2
-    const sync = await step('tg_sync', syncChannel(supabase, name, () => stockIndex(supabase), { sinceTs: since, maxPages, firstPage }))
+    const sync = await step('tg_sync', syncChannel(supabase, name, { sinceTs: since, maxPages, firstPage }))
     if (!sync.ok) return { ok: false, error: sync.error ?? 'sync failed' }
     if (sync.backfill_pending) backfillInBackground(supabase, name)
     return {
@@ -182,6 +200,26 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     const day = await dayP
     const { data } = await step('resolve_stock', supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', day).eq('isu_nm', s).limit(1))
     return data?.[0]?.isu_cd ?? null
+  }
+
+  // A US ticker that's listed (us_symbols), normalized (BRK-B → BRK.B); null if it isn't
+  async function resolveUs(ticker: string): Promise<string | null> {
+    const t = normTicker(ticker)
+    const { data } = await step('resolve_us', supabase.from('us_symbols').select('ticker').eq('ticker', t).limit(1))
+    return data?.[0]?.ticker ?? null
+  }
+
+  // Filters shared by the feed and search: a KR stock, a US ticker, an event. An error message for an unknown one.
+  async function resolveFilters(f: { stock?: string; us_stock?: string; event?: string }, day: Day) {
+    const [code, us, ev] = await Promise.all([
+      f.stock ? resolveStock(f.stock, day) : null,
+      f.us_stock ? resolveUs(f.us_stock) : null,
+      f.event ? step('event', supabase.from('telegram_events').select('id').eq('id', f.event.trim().toLowerCase())) : null,
+    ])
+    if (f.stock && !code) return { error: `Unknown stock: ${f.stock}. Pass a 종목코드 or the exact 종목명 (see find_stock).` }
+    if (f.us_stock && !us) return { error: `Unknown US ticker: ${f.us_stock}. Pass a listed ticker (see find_us_stock).` }
+    if (f.event && !ev?.data?.length) return { error: `Unknown event: ${f.event} (see list_telegram_events).` }
+    return { code, us, event: ev?.data?.[0]?.id ?? null }
   }
 
   server.registerTool(
@@ -376,8 +414,10 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     {
       title: '텔레그램 채널 글',
       description:
-        'Recent posts from collected public Telegram channels, newest first, with a link to each post and the stocks ' +
-        'mentioned (matched by 종목명 or 종목코드). Filter by channel, by stock, and by time. Channels are polled ' +
+        'Recent posts from collected public Telegram channels, newest first, with a link to each post, the stocks ' +
+        'mentioned (KR: stocks, US: us_stocks) and the events it is about. Posts are labeled as they arrive, and noise ' +
+        '(chatter, channel housekeeping, empty posts) is hidden unless include_noise is true. Filter by channel, by KR ' +
+        'stock, by US ticker, by event (list_telegram_events), and by time. Channels are polled ' +
         'every 5 minutes. Across several channels the `limit` slots are shared fairly, so one busy channel cannot ' +
         "crowd out the others; with the default window (no `since`), today's posts (KST) come first and earlier days " +
         'fill the rest. `channels` gives each channel\'s shown / today / total posts in the window: pass `channel` ' +
@@ -388,13 +428,16 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
         channel: z.string().optional().describe("one channel (@name, name, or t.me link); omit for the user's channels"),
         all_channels: z.boolean().default(false).describe("every collected channel, not just the user's"),
         stock: z.string().optional().describe('종목코드 or exact 종목명: only posts mentioning it'),
+        us_stock: z.string().optional().describe('US ticker (e.g. NVDA; find_us_stock looks one up): only posts mentioning it'),
+        event: z.string().optional().describe('event id (list_telegram_events): only posts about it'),
         since: z.string().optional().describe("YYYY-MM-DD (KST) or ISO time; default: 3 days ago, today's posts first"),
         limit: z.number().int().min(1).max(100).default(20).describe('posts in all, shared fairly across channels'),
         max_chars: z.number().int().min(100).max(5000).default(1500).describe('truncate each post to this many characters'),
+        include_noise: z.boolean().default(false).describe('also show posts labeled noise (marked noise: true), e.g. to review the labels'),
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ channel, all_channels, stock, since, limit, max_chars }) => {
+    async ({ channel, all_channels, stock, us_stock, event, since, limit, max_chars, include_noise }) => {
       const name = channel ? channelName(channel) : null
       if (channel && !name) return json({ error: `Not a valid Telegram channel name: ${channel}` })
       // Answers from stored posts; telegram-ingest polls every channel every 5 minutes.
@@ -406,11 +449,8 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
         ? early(step('channel_exists', supabase.from('telegram_channels').select('username').eq('username', name)))
         : null
 
-      let code: string | null = null
-      if (stock) {
-        code = await resolveStock(stock, day)
-        if (!code) return json({ error: `Unknown stock: ${stock}. Pass a 종목코드 or the exact 종목명 (see find_stock).` })
-      }
+      const f = await resolveFilters({ stock, us_stock, event }, day)
+      if ('error' in f) return json({ error: f.error })
 
       const sinceTs = sinceIso(since, 3)
       // Round-robin across channels, today first in the default window (migration 20261118000003_telegram_feed.sql)
@@ -419,8 +459,11 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
           p_since: sinceTs,
           p_limit: limit,
           p_channels: scope,
-          p_stock: code,
+          p_stock: f.code,
           p_today_first: !since,
+          p_us: f.us,
+          p_event: f.event,
+          p_include_noise: include_noise,
         }))
 
       // The backfill check runs alongside the posts query (same scope)
@@ -467,22 +510,33 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       title: '텔레그램 검색',
       description:
         'Searches collected public Telegram posts for words (all words must appear, case-insensitive substring ' +
-        'match, so Korean works). Returns a snippet around the first match and a link to each post, newest first.',
+        'match, so Korean works). Returns a snippet around the first match and a link to each post, newest first. ' +
+        'Narrow it by KR stock, US ticker or event, like get_telegram_feed; noise is hidden unless include_noise is true.',
       inputSchema: z.object({
         query: z.string().min(1).describe('words separated by spaces, e.g. "HBM 수주"'),
         channel: z.string().optional(),
+        stock: z.string().optional().describe('종목코드 or exact 종목명: only posts mentioning it'),
+        us_stock: z.string().optional().describe('US ticker: only posts mentioning it'),
+        event: z.string().optional().describe('event id: only posts about it'),
         since: z.string().optional().describe('YYYY-MM-DD (KST) or ISO time; default: 30 days ago'),
         limit: z.number().int().min(1).max(50).default(20),
+        include_noise: z.boolean().default(false),
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ query, channel, since, limit }) => {
+    async ({ query, channel, stock, us_stock, event, since, limit, include_noise }) => {
       const day = early(latestTradingDay(supabase)) // for 종목명, alongside the search
       const terms = query.trim().split(/\s+/).filter(Boolean).slice(0, 5)
       const name = channel ? channelName(channel) : null
       const sinceTs = sinceIso(since, 30)
+      const f = await resolveFilters({ stock, us_stock, event }, day)
+      if ('error' in f) return json({ error: f.error })
       let q = supabase.from('telegram_messages').select(MSG_COLUMNS).gte('ts', sinceTs)
       if (name) q = q.eq('username', name)
+      if (!include_noise) q = q.or('label.is.null,label.neq.noise')
+      if (f.code) q = q.contains('stock_codes', [f.code])
+      if (f.us) q = q.contains('us_tickers', [f.us])
+      if (f.event) q = q.contains('events', [f.event])
       for (const t of terms) q = q.ilike('text', `%${t.replace(/[\\%_]/g, (c) => '\\' + c)}%`)
       const [{ data, error }, pending] = await Promise.all([
         step('search', q.order('ts', { ascending: false }).limit(limit)),
@@ -502,6 +556,57 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
         ...withCollecting(pending),
         posts: await present((data ?? []) as Msg[], 0, day, snippet),
       })
+    },
+  )
+  server.registerTool(
+    'find_us_stock',
+    {
+      title: '미국 종목 검색',
+      description:
+        'Finds US-listed stocks (Nasdaq, NYSE and the other US exchanges; no ETFs) by ticker or English company name, ' +
+        'for the us_stock filter of get_telegram_feed and search_telegram. Korean names are not searchable: pass the ' +
+        'English name (엔비디아 → NVIDIA).',
+      inputSchema: z.object({ query: z.string().min(1).describe('ticker (NVDA) or part of the English name (nvidia)') }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ query }) => {
+      const t = normTicker(query)
+      const like = `%${query.trim().replace(/[\\%_]/g, (c) => '\\' + c)}%`
+      const [exact, byName] = await Promise.all([
+        step('us_ticker', supabase.from('us_symbols').select('ticker, name, exchange').eq('ticker', t)),
+        step('us_name', supabase.from('us_symbols').select('ticker, name, exchange').ilike('name', like).order('ticker').limit(20)),
+      ])
+      for (const r of [exact, byName]) if (r.error) throw new Error(r.error.message)
+      const rows = [...new Map([...(exact.data ?? []), ...(byName.data ?? [])].map((r) => [r.ticker, r])).values()]
+      return json(rows.slice(0, 20))
+    },
+  )
+
+  server.registerTool(
+    'list_telegram_events',
+    {
+      title: '텔레그램 이벤트 목록',
+      description:
+        'Events that Telegram posts are tagged with (chosen by the operator, e.g. a company\'s IPO), with what each covers ' +
+        'and how many posts are tagged. Pass an id as `event` to get_telegram_feed or search_telegram.',
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const { data, error } = await step('events', supabase.from('telegram_events').select('id, description, active_from, active_to').order('created_at', { ascending: false }))
+      if (error) throw new Error(error.message)
+      const counts = await Promise.all((data ?? []).map((e) =>
+        supabase.from('telegram_messages').select('msg_id', { count: 'exact', head: true }).contains('events', [e.id])
+          .or('label.is.null,label.neq.noise')
+      ))
+      return json((data ?? []).map((e, i) => ({
+        id: e.id,
+        description: e.description,
+        ...(e.active_from ? { from: kst(e.active_from) } : {}),
+        ...(e.active_to ? { to: kst(e.active_to) } : {}),
+        active: !e.active_to || Date.parse(e.active_to) > Date.now(),
+        posts: counts[i].count ?? 0,
+      })))
     },
   )
 }

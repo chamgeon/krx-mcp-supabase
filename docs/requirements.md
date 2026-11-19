@@ -57,6 +57,9 @@ column points at the test that proves it, or is empty where none exists yet.
 | FR-TG-3 | M | `search_telegram` returns posts containing all query words, with a snippet and link. | mcp_test: "search_telegram: every word must match" |
 | FR-TG-4 | M | `set_my_channels` / `update_my_channels` collect channels that aren't collected yet before following them. | mcp_test: "channel preferences: set, update, feed scope" |
 | FR-TG-5 | M | A user's followed channels are visible and editable only by that user. | mcp_test: "channel preferences need a logged-in user" |
+| FR-TG-7 | M | `telegram-ingest` gates every stored post (Claude Haiku, `_shared/gate.ts`): label market / noise, KR codes and US tickers that pass the name check against the KRX list and `us_symbols`, events from `telegram_events`; newest first, 40 per run, failed calls retried on the next run; an edited post or a new event re-gates; a run where every call fails alerts. | gate_test (checks, symbol files); db_test: "gate trigger", "adding an event re-gates", "gateBatch", "refreshUsSymbols" |
+| FR-TG-8 | M | Noise is hidden from `get_telegram_feed` and `search_telegram`; `include_noise: true` shows it, marked `noise: true`. | mcp_test: "get_telegram_feed: noise is hidden…", "search_telegram: hides noise…" |
+| FR-TG-9 | M | Feed and search filter by US ticker (`us_stock`) and event (`event`); posts list `us_stocks` and `events`; `find_us_stock` looks up a ticker or English name; `list_telegram_events` lists the events. | mcp_test: same, and "find_us_stock: by ticker and by English name; list_telegram_events" |
 | FR-TG-6 | M | While a channel's older posts are still being collected, `get_telegram_feed` and `search_telegram` say so (`still_collecting`, with the time collected from) when the requested window starts before that time, and only then. | mcp_test: "feed and search say when a channel is still filling" |
 
 ### Data pipeline
@@ -99,8 +102,8 @@ Calls in a round run back to back, so after the warm-up call they reuse running 
 
 | ID | P | Requirement | Baseline (bench 11-17 after-parallel) | Status |
 |---|---|---|---|---|
-| PERF-5 | S | Warm server latency p95: Tier A ≤ 250 ms, Tier B ≤ 800 ms | A: 49–133 ms except feed(1h) 453; B: analyze 787, screen 337 | ⚠️ feed(1h) |
-| PERF-6 | M | Warm end-to-end p95: Tier A ≤ 1,500 ms, Tier B ≤ 2,500 ms | A: 412–854 ms except feed(1h) **1,668**; B: analyze 1,637, screen 839 | ⚠️ feed(1h) |
+| PERF-5 | S | Warm server latency p95: Tier A ≤ 250 ms, Tier B ≤ 800 ms | bench 11-19, each round's first call excluded (after the 60 s pause it pays the connection warm-up: 370–720 ms): A: 71–203 ms (feed(1h) 203, was 453 on 11-17); B: analyze 770, screen 406 | ✅ |
+| PERF-6 | M | Warm end-to-end p95: Tier A ≤ 1,500 ms, Tier B ≤ 2,500 ms | A: 412–854 ms except feed(1h) **1,668**; B: analyze 1,637, screen 839 (11-17; the 11-19 bench landed in ap-northeast-2, not comparable) | ❔ re-run `bench --region us-east-1` |
 | PERF-8 | S | Forward hop p95 ≤ 1,000 ms | p95 800 ms, p50 523 (n=53, us-east-1) | ✅ |
 
 ### 2.3 Performance: cold (`scripts/bench_cold.ts`)
@@ -186,7 +189,7 @@ Responses go into an LLM's context window, so size is a cost and a quality issue
 
 | ID | P | Requirement | Baseline | Status |
 |---|---|---|---|---|
-| ING-1 | M | Every ingest run finishes within the Edge Function wall-clock limit with ≥ 25% headroom | krx max **126 s**, p95 112 s; kis: 129 s and 135 s on 11-18, and two runs stopped at 150 s (11:55, 12:00 KST) | ⚠️ krx, kis |
+| ING-1 | M | Every ingest run finishes within the Edge Function wall-clock limit with ≥ 25% headroom | 11-19, both in Seoul: krx max 46 s (the loading run; was 126 s from Mumbai on 11-18), kis max 21 s (n=46; was 129–135 s and two stopped at 150 s on 11-18) | ✅ |
 | ING-2 | S | kis-ingest p95 ≤ 60 s, so 5-min runs never overlap | p95 45 s | ✅ |
 | ING-3 | S | telegram-ingest p95 ≤ 30 s | p95 7.4 s | ✅ |
 
@@ -206,9 +209,9 @@ Responses go into an LLM's context window, so size is a cost and a quality issue
 | CAP-1 | M | Database ≤ 400 MB (80% of the 500 MB free limit); alert when exceeded | 283 MB (57%) | ✅ |
 | CAP-2 | M | KRX API calls ≤ 10,000 per day, including backfill | | ✅ |
 | CAP-3 | M | KIS calls stay under the per-second limit; on a limit error, back off and retry | `_shared/kis.ts` | ✅ |
-| CAP-4 | S | `ingest_runs` keeps 90 days, `live_prices` 10 days; `tool_calls` has a retention policy | ingest 90 d, live 10 d (pipeline-report); tool_calls unbounded | ⚠️ tool_calls |
+| CAP-4 | S | `ingest_runs` keeps 90 days, `live_prices` 10 days; `tool_calls` is kept in full (few users, and it's the usage record) | ingest 90 d, live 10 d (pipeline-report) | ✅ |
 | CAP-5 | S | Monthly Edge Function invocations ≤ 80% of the free quota | | ❔ |
-| CAP-6 | M | Running cost stays $0/month | | ✅ |
+| CAP-6 | M | Running cost stays under $1/month: the Supabase free plan, plus the Anthropic API for the Telegram gate | gate ~$0.37/month at ~90 posts/day (Haiku 5.5, measured on 741 posts, 2026-11-19) | ❔ after a month live |
 
 ### 2.10 Security and compliance
 

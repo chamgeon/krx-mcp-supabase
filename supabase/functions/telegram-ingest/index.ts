@@ -5,7 +5,8 @@
 //
 //   POST /functions/v1/telegram-ingest                 -> poll all active channels (newest page; more if there's a gap)
 //   POST /functions/v1/telegram-ingest?channel=ehdwl   -> poll one channel
-//   POST /functions/v1/telegram-ingest?retag=1         -> recompute stock tags of all stored posts
+//   POST /functions/v1/telegram-ingest?gate=500        -> no polling: gate up to 500 ungated posts now (e.g. the posts
+//                                                         stored before the gate, at once instead of 40 per run)
 //
 // Channels that keep failing (e.g. the owner turned the preview off) are retried at most hourly. Returns 500 when any
 // channel fails, so failures show up in the function logs.
@@ -14,53 +15,41 @@
 // MCP function, and if that worker ended midway (no progress for 3 minutes), the backfill continues here from its
 // saved progress. A failed backfill page doesn't fail the run (the channel's own poll reports a broken channel); it
 // counts towards the page cap, so retries end.
+//
+// Then the gate (./gating.ts, ../_shared/gate.ts): the newest ungated posts, GATE_BATCH per run, are labeled market or
+// noise and tagged by Claude Haiku (KR codes, US tickers, events), and us_symbols is refreshed daily. It runs only when
+// ANTHROPIC_API_KEY is set. A post whose call fails stays ungated for the next run; if every call fails (key, outage),
+// the run fails and alerts.
 
 import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import {
-  backfillChannel, type BackfillResult, BACKFILL_STALE_MS, loadStockIndex, stockIndex, syncChannel, tagStocks,
-  type SyncResult,
+  backfillChannel, type BackfillResult, BACKFILL_STALE_MS, syncChannel, type SyncResult,
 } from '../_shared/telegram.ts'
 import { monitored, sendTelegram } from '../_shared/ops.ts'
+import Anthropic from 'npm:@anthropic-ai/sdk@1.5.0'
 import { channelAlerts } from './alerts.ts'
+import { GATE_MAX, gateBatch, type GateSummary, refreshUsSymbols } from './gating.ts'
 
 const INGEST_SECRET = Deno.env.get('INGEST_SECRET')!
+const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')
+const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL')!,
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
   { auth: { persistSession: false } },
 )
 
-// Recomputes stock_codes for every stored post (after the tagging rules or the stock list change).
-async function retag() {
-  const idx = await loadStockIndex(supabase)
-  let scanned = 0
-  let changed = 0
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await supabase
-      .from('telegram_messages').select('username, msg_id, text, stock_codes')
-      .order('username').order('msg_id').range(from, from + 999)
-    if (error) throw new Error(error.message)
-    for (const m of data ?? []) {
-      scanned++
-      const tags = tagStocks(m.text, idx)
-      if ([...tags].sort().join() === [...m.stock_codes].sort().join()) continue
-      const { error: e } = await supabase.from('telegram_messages').update({ stock_codes: tags })
-        .eq('username', m.username).eq('msg_id', m.msg_id)
-      if (e) throw new Error(e.message)
-      changed++
-    }
-    if (!data || data.length < 1000) break
-  }
-  return { retag: true, scanned, changed }
-}
-
 const CHANNEL_PAUSE_MS = 300
 const FAILING_RETRY_MS = 3600_000
 
 // Every run is recorded in ingest_runs (../_shared/ops.ts). Channel failures alert only when a channel starts failing or
-// works again (./alerts.ts); a failure of the whole run (no per-channel results) gets the usual hourly alert.
-const wholeRunFailed = (body: unknown) => !Array.isArray((body as { results?: unknown } | null)?.results)
+// works again (./alerts.ts); a failure of the whole run (no per-channel results), or of the whole gate step, gets the
+// usual hourly alert.
+const wholeRunFailed = (body: unknown) => {
+  const b = body as { results?: unknown; gate?: { error?: string } } | null
+  return !Array.isArray(b?.results) || typeof b?.gate?.error === 'string'
+}
 
 Deno.serve(monitored('telegram-ingest', supabase, async (req) => {
   if (req.headers.get('x-ingest-secret') !== INGEST_SECRET) {
@@ -68,7 +57,13 @@ Deno.serve(monitored('telegram-ingest', supabase, async (req) => {
   }
 
   const params = new URL(req.url).searchParams
-  if (params.has('retag')) return Response.json(await retag())
+  if (params.has('gate')) {
+    if (!anthropic) return Response.json({ error: 'ANTHROPIC_API_KEY is not set' }, { status: 400 })
+    const n = Math.min(Math.max(1, Number(params.get('gate')) || GATE_MAX), GATE_MAX)
+    const symbols = await refreshUsSymbols(supabase).catch((e) => ({ error: (e as Error).message }))
+    const gate = await gateBatch(supabase, anthropic, n)
+    return Response.json({ gate_only: true, results: [], gate, us_symbols: symbols }, { status: gate.error ? 500 : 200 })
+  }
 
   const only = params.get('channel')?.toLowerCase()
   let q = supabase.from('telegram_channels').select('username, poll_errors, last_polled_at').eq('active', true)
@@ -84,7 +79,7 @@ Deno.serve(monitored('telegram-ingest', supabase, async (req) => {
   const results: SyncResult[] = []
   for (const c of due) {
     if (results.length) await new Promise((r) => setTimeout(r, CHANNEL_PAUSE_MS))
-    results.push(await syncChannel(supabase, c.username, () => stockIndex(supabase)))
+    results.push(await syncChannel(supabase, c.username))
   }
 
   const alert = channelAlerts(new Map(due.map((c) => [c.username, c.poll_errors])), results)
@@ -100,7 +95,23 @@ Deno.serve(monitored('telegram-ingest', supabase, async (req) => {
   const backfills: BackfillResult[] = []
   for (const c of stalled ?? []) {
     await new Promise((r) => setTimeout(r, CHANNEL_PAUSE_MS))
-    backfills.push(await backfillChannel(supabase, c.username, () => stockIndex(supabase), { resume: true }))
+    backfills.push(await backfillChannel(supabase, c.username, { resume: true }))
+  }
+
+  // The gate, after the posts are stored. Its own errors don't stop the run; a gate that failed entirely fails it.
+  let gate: GateSummary | { error: string } | null = null
+  let symbols: unknown = null
+  if (anthropic && !only) {
+    try {
+      symbols = await refreshUsSymbols(supabase)
+    } catch (e) {
+      symbols = { error: (e as Error).message } // the stored list stays in use
+    }
+    try {
+      gate = await gateBatch(supabase, anthropic)
+    } catch (e) {
+      gate = { error: `gate: ${(e as Error).message}` }
+    }
   }
 
   const failed = results.filter((r) => !r.ok)
@@ -111,7 +122,9 @@ Deno.serve(monitored('telegram-ingest', supabase, async (req) => {
       new_posts: results.reduce((n, r) => n + r.new_posts, 0),
       results,
       ...(backfills.length ? { backfills } : {}),
+      ...(gate ? { gate } : {}),
+      ...(symbols && (symbols as { refreshed?: boolean }).refreshed !== false ? { us_symbols: symbols } : {}),
     },
-    { status: failed.length ? 500 : 200 },
+    { status: failed.length || (gate && 'error' in gate && gate.error) ? 500 : 200 },
   )
 }, { alertOn: wholeRunFailed }))

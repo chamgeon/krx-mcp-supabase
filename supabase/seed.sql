@@ -111,3 +111,13 @@ insert into public.telegram_messages (username, msg_id, ts, text, views, stock_c
   ('testchannel_a', 1, '2026-11-13T01:00:00Z', '돌파전자 신고가 돌파, HBM 수주 기대', 1200, '{900001}'),
   ('testchannel_a', 2, '2026-11-13T02:00:00Z', '급증바이오 거래대금 급증', 800, '{900002}'),
   ('testchannel_b', 1, '2026-11-12T00:00:00Z', 'HBM 관련 업황 코멘트', 300, '{}');
+
+-- Telegram gate (migration 20261119000000): a few US symbols for the US filters and find_us_stock, and one event.
+-- The seed posts above stay ungated (label null), as posts are before telegram-ingest gates them.
+insert into public.us_symbols (ticker, name, exchange) values
+  ('NVDA', 'NVIDIA Corporation - Common Stock', 'NASDAQ'),
+  ('MSFT', 'Microsoft Corporation - Common Stock', 'NASDAQ'),
+  ('MS', 'Morgan Stanley Common Stock', 'NYSE');
+
+insert into public.telegram_events (id, description, active_from) values
+  ('test-ipo', 'A test company''s IPO', '2026-11-01T00:00:00Z');

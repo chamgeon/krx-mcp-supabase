@@ -8,3 +8,6 @@ supabase/functions/*/fixtures/
 
 # Benchmark results (scripts/bench.ts)
 bench-results/
+
+# Local experiments (third-party posts and model output): scripts/tg_gate.ts
+experiments/

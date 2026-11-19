@@ -133,114 +133,6 @@ export function parsePage(html: string, channel: string): TgPage {
   return { title, posts }
 }
 
-// ---- Stock tagging ----
-// Stock names are matched as plain substrings, longest first. Names shorter than 3 characters are skipped because they
-// collide with ordinary words (e.g. 대상, 한국), and 6-digit codes are matched directly.
-
-export type StockIndex = { names: [string, string][]; codes: Set<string> }
-
-// Cached per function instance: the stock list changes at most once a day, and loading ~2,800 names takes a few
-// round trips. Callers that may not need it (a poll with no new posts) pass stockIndex as a lazy getter.
-const INDEX_TTL_MS = 6 * 3600_000
-let cachedIndex: { idx: StockIndex; at: number } | null = null
-
-export async function stockIndex(supabase: SupabaseClient): Promise<StockIndex> {
-  if (cachedIndex && Date.now() - cachedIndex.at < INDEX_TTL_MS) return cachedIndex.idx
-  cachedIndex = { idx: await loadStockIndex(supabase), at: Date.now() }
-  return cachedIndex.idx
-}
-
-export async function loadStockIndex(supabase: SupabaseClient): Promise<StockIndex> {
-  const { data: last, error: e1 } = await supabase
-    .from('available_dates').select('bas_dd').order('bas_dd', { ascending: false }).limit(1)
-  if (e1) throw new Error(e1.message)
-  const stocks: { isu_cd: string; isu_nm: string }[] = []
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await supabase
-      .from('prices').select('isu_cd, isu_nm').eq('bas_dd', last?.[0]?.bas_dd).order('isu_cd').range(from, from + 999)
-    if (error) throw new Error(error.message)
-    stocks.push(...(data ?? []))
-    if (!data || data.length < 1000) break
-  }
-  return buildStockIndex(stocks)
-}
-
-// Nicknames for a few large caps, matched like names (whole words) and allowed under 3 characters because each was
-// chosen by hand. Checked against the stock list (2026-11-18); an alias whose code isn't listed is ignored. Left out
-// on purpose: 포스코 (several POSCO companies). After changing this list, retag (telegram-ingest?retag=1).
-export const STOCK_ALIASES: [alias: string, code: string][] = [
-  ['삼전', '005930'], // 삼성전자
-  ['하닉', '000660'], // SK하이닉스
-  ['하이닉스', '000660'],
-  ['엘엔솔', '373220'], // LG에너지솔루션
-  ['엘지엔솔', '373220'],
-  ['LG엔솔', '373220'],
-  ['현차', '005380'], // 현대차
-  ['기아차', '000270'], // 기아 (its name until 2021)
-  ['삼바', '207940'], // 삼성바이오로직스
-  ['셀트', '068270'], // 셀트리온
-  ['카뱅', '323410'], // 카카오뱅크
-  ['한화에어로', '012450'], // 한화에어로스페이스
-  ['에코비엠', '247540'], // 에코프로비엠
-  ['두산에너빌', '034020'], // 두산에너빌리티
-  ['네이버', '035420'], // NAVER
-]
-
-export function buildStockIndex(
-  stocks: { isu_cd: string; isu_nm: string }[],
-  aliases: [string, string][] = STOCK_ALIASES,
-): StockIndex {
-  const names: [string, string][] = []
-  const codes = new Set<string>()
-  for (const r of stocks) {
-    codes.add(r.isu_cd)
-    if ([...r.isu_nm].length < 3) continue
-    names.push([r.isu_nm, r.isu_cd])
-    // Group prefixes are often written with a space: SK 하이닉스, LG 에너지솔루션
-    const m = r.isu_nm.match(/^([A-Z&]+)(\p{Script=Hangul}.*)$/u)
-    if (m) names.push([`${m[1]} ${m[2]}`, r.isu_cd])
-  }
-  for (const [alias, code] of aliases) if (codes.has(code)) names.push([alias, code])
-  names.sort((a, b) => b[0].length - a[0].length) // longest first, so 삼성전자우 is checked before 삼성전자
-  return { names, codes }
-}
-
-// A name only counts as a whole word: not glued to letters before it, and followed by a space, punctuation, or a
-// Korean particle. Otherwise 퀀텀스케이프 would tag 케이프, 하이브리드 하이브, and 아스트라제네카 아스트.
-const LETTER = /[\p{L}\p{N}]/u
-const PARTICLES = [
-  '으로', '에서', '에게', '까지', '부터', '보다', '처럼', '대비', '주가', '이다', '였다',
-  '은', '는', '이', '가', '을', '를', '의', '와', '과', '도', '에', '로', '만', '측', '향', '등', '및', '株', '랑',
-  'ADR', 'GDR', // depositary receipts: SK하이닉스ADR is still SK하이닉스
-]
-
-function isWholeWord(text: string, start: number, end: number): boolean {
-  const before = text[start - 1]
-  if (before && LETTER.test(before)) return false
-  const after = text.slice(end)
-  if (!after || !LETTER.test(after[0])) return true
-  return PARTICLES.some((p) => after.startsWith(p))
-}
-
-export function tagStocks(text: string, idx: StockIndex): string[] {
-  const found = new Set<string>()
-  let rest = text
-  for (const [name, code] of idx.names) {
-    let from = 0
-    for (let i = rest.indexOf(name, from); i !== -1; i = rest.indexOf(name, from)) {
-      from = i + name.length
-      if (!isWholeWord(rest, i, from)) continue
-      found.add(code)
-      // a matched name consumes its text, so 삼성전자우 doesn't also tag 삼성전자
-      rest = rest.slice(0, i) + ' '.repeat(name.length) + rest.slice(from)
-    }
-  }
-  // Codes: 6 characters, mostly digits, but 96 listed stocks have a letter (0001A0, 00088K). Only listed codes count,
-  // so a 6-letter word like NVIDIA never matches.
-  for (const m of text.matchAll(/(?<![0-9A-Za-z])([0-9A-Z]{6})(?![0-9A-Za-z])/g)) if (idx.codes.has(m[1])) found.add(m[1])
-  return [...found]
-}
-
 // ---- Sync ----
 
 export type SyncResult = {
@@ -253,20 +145,14 @@ export type SyncResult = {
 }
 
 /**
- * Stores posts from one page. `fresh` posts are new to us and get stock tags (the stock index is only loaded when
- * there are any). `seen` posts only get views/text refreshed: leaving stock_codes out of the upsert keeps their tags,
- * and a post that parses empty now (format change, or a caption-less edit) keeps its stored text.
+ * Stores posts from one page. Posts are stored untagged: the gate (telegram-ingest, ./gate.ts) labels and tags them
+ * afterwards, and the upserts never touch its columns, so a page fetched again keeps its tags. `seen` posts only get
+ * views/text refreshed; a post that parses empty now (format change, or a caption-less edit) keeps its stored text.
+ * A changed text is gated again (a trigger resets gated_at).
  */
-async function storePosts(
-  supabase: SupabaseClient,
-  channel: string,
-  fresh: TgPost[],
-  seen: TgPost[],
-  getIndex: () => Promise<StockIndex>,
-) {
+async function storePosts(supabase: SupabaseClient, channel: string, fresh: TgPost[], seen: TgPost[]) {
   if (fresh.length) {
-    const idx = await getIndex()
-    const rows = fresh.map((p) => ({ username: channel, ...p, stock_codes: tagStocks(p.text, idx) }))
+    const rows = fresh.map((p) => ({ username: channel, ...p }))
     const { error } = await supabase.from('telegram_messages').upsert(rows, { onConflict: 'username,msg_id' })
     if (error) throw new Error(`save posts: ${error.message}`)
   }
@@ -293,7 +179,6 @@ const oldestOf = (posts: TgPost[]) => posts.reduce((a, p) => (p.msg_id < a.msg_i
 export async function syncChannel(
   supabase: SupabaseClient,
   channel: string,
-  getIndex: () => Promise<StockIndex>,
   opts: { sinceTs?: string; maxPages?: number; firstPage?: TgPage } = {},
 ): Promise<SyncResult> {
   const maxPages = opts.maxPages ?? 5
@@ -323,7 +208,7 @@ export async function syncChannel(
       }
       if (page.posts.length === 0) { complete = true; break }
       const fresh = page.posts.filter((p) => p.msg_id > known)
-      await storePosts(supabase, channel, fresh, page.posts.filter((p) => p.msg_id <= known), getIndex)
+      await storePosts(supabase, channel, fresh, page.posts.filter((p) => p.msg_id <= known))
       newPosts += fresh.length
       newest = Math.max(newest, ...page.posts.map((p) => p.msg_id))
       oldest = oldestOf(page.posts)
@@ -388,7 +273,6 @@ const DONE = { backfill_before: null, backfill_oldest_ts: null, backfill_since: 
 export async function backfillChannel(
   supabase: SupabaseClient,
   channel: string,
-  getIndex: () => Promise<StockIndex>,
   opts: { resume?: boolean; pauseMs?: number } = {},
 ): Promise<BackfillResult> {
   const pauseMs = opts.pauseMs ?? PAGE_PAUSE_MS
@@ -425,9 +309,8 @@ export async function backfillChannel(
         await finish(DONE)
         return { ...result, done: true }
       }
-      // These are older than anything stored, so all are tagged; a page fetched again after an interruption just
-      // gets the same tags again
-      await storePosts(supabase, channel, page.posts, [], getIndex)
+      // Older than anything stored; a page fetched again after an interruption is upserted the same way
+      await storePosts(supabase, channel, page.posts, [])
       result.new_posts += page.posts.length
       const oldest = oldestOf(page.posts)
       // As dates: post times are t.me's datetime attribute, backfill_since is Postgres's rendering

@@ -1,6 +1,7 @@
 // Builds the daily pipeline report (sent at 18:00 KST) from the ingest runs of the last 24 hours. Pure: index.ts
 // fetches the data and sends the text.
 
+import { GATE_PRICE } from '../_shared/gate.ts'
 import { kstTime } from '../_shared/ops.ts'
 
 export type Run = {
@@ -8,7 +9,7 @@ export type Run = {
   started_at: string
   ok: boolean | null // null: still running (or stopped and not yet marked; ops.ts sweepKilled marks it within minutes)
   // the function's answer: kis-ingest { date, rows, as_of } | { date, skipped }; krx-ingest { results };
-  // telegram-ingest { polled, new_posts }
+  // telegram-ingest { polled, new_posts, gate?: { gated, noise, failed, left, tokens: { input, output } } | { error } }
   // deno-lint-ignore no-explicit-any
   summary: any
   error: string | null
@@ -26,6 +27,30 @@ export type ReportInput = {
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const n = (x: number) => x.toLocaleString('en-US')
 const count = (x: number, one: string, many: string) => `${n(x)} ${x === 1 ? one : many}`
+
+const M = (x: number) => (x >= 1e6 ? `${(x / 1e6).toFixed(2)}M` : `${Math.round(x / 1e3)}K`)
+
+/**
+ * The Telegram gate over the window, from telegram-ingest's run summaries (telegram-ingest/gating.ts): posts gated,
+ * the share labeled noise, failed calls, the backlog after the last run, tokens and their cost at Haiku's price.
+ * Null when no run gated (no ANTHROPIC_API_KEY): the gate is off.
+ */
+export function gateReport(tg: Run[]): string | null {
+  const gates = tg.map((r) => r.summary?.gate).filter((g) => g && typeof g === 'object')
+  if (!gates.length) return null
+  const sum = (f: (g: { gated?: number; noise?: number; failed?: number; tokens?: { input?: number; output?: number } }) => number | undefined) =>
+    gates.reduce((s, g) => s + (Number(f(g)) || 0), 0)
+  const gated = sum((g) => g.gated), noise = sum((g) => g.noise), failed = sum((g) => g.failed)
+  const input = sum((g) => g.tokens?.input), output = sum((g) => g.tokens?.output)
+  const cost = (input * GATE_PRICE.input + output * GATE_PRICE.output) / 1e6
+  const broken = gates.filter((g) => typeof g.error === 'string').length
+  const left = [...gates].reverse().find((g) => typeof g.left === 'number')?.left as number | undefined
+  const pct = gated ? Math.round((noise / gated) * 100) : 0
+  const icon = broken || (failed && failed >= gated) ? '❌' : failed ? '⚠️' : '✅'
+  return `${icon} Telegram gate: ${count(gated, 'post', 'posts')} gated, ${pct}% noise (${n(noise)})` +
+    `${failed ? `, ${n(failed)} failed calls` : ''}${broken ? `, ${count(broken, 'run', 'runs')} with every call failing` : ''}` +
+    `${left ? `, ${n(left)} still ungated` : ''} · ${M(input)} in / ${M(output)} out tokens ≈ $${cost.toFixed(2)}`
+}
 
 /** The latest 18:00 KST (09:00 UTC) at or before `now`: the end of the report's window. */
 export function reportWindowEnd(now: Date): Date {
@@ -83,12 +108,15 @@ export function buildReport({ end, runs, pendingKrxDays, krxLatest, channelError
 
   // Telegram
   const tg = of('telegram-ingest')
-  if (!tg.length) {
+  const polls = tg.filter((r) => !r.summary?.gate_only) // ?gate=N runs only gate (telegram-ingest/index.ts)
+  if (!polls.length) {
     lines.push("❌ Telegram: telegram-ingest didn't run")
   } else {
-    const posts = tg.reduce((s, r) => s + (Number(r.summary?.new_posts) || 0), 0)
-    lines.push(`✅ Telegram: ${count(tg.length, 'poll', 'polls')}, ${count(posts, 'new post', 'new posts')}`)
+    const posts = polls.reduce((s, r) => s + (Number(r.summary?.new_posts) || 0), 0)
+    lines.push(`✅ Telegram: ${count(polls.length, 'poll', 'polls')}, ${count(posts, 'new post', 'new posts')}`)
   }
+  const gateLine = gateReport(tg)
+  if (gateLine) lines.push(gateLine)
   if (channelErrors.length) {
     lines.push(
       `⚠️ Telegram channels failing: ${

@@ -180,9 +180,9 @@ test('a logged-in user token works', async () => {
 test('tools/list: exactly the expected tools, each described', async () => {
   const { tools } = await (await keyClient()).listTools()
   assertEquals(tools.map((t) => t.name).sort(), [
-    'add_telegram_channel', 'analyze_stock', 'check_available_dates', 'find_stock', 'get_daily_movers', 'get_my_channels',
-    'get_stock_history', 'get_telegram_feed', 'list_telegram_channels', 'screen_stocks', 'search_telegram',
-    'set_my_channels', 'update_my_channels',
+    'add_telegram_channel', 'analyze_stock', 'check_available_dates', 'find_stock', 'find_us_stock', 'get_daily_movers',
+    'get_my_channels', 'get_stock_history', 'get_telegram_feed', 'list_telegram_channels', 'list_telegram_events',
+    'screen_stocks', 'search_telegram', 'set_my_channels', 'update_my_channels',
   ])
   for (const t of tools) {
     assert((t.description ?? '').length > 20, `${t.name} has no real description`)
@@ -407,6 +407,63 @@ test("get_telegram_feed: the default window shares today's posts first", async (
     // An explicit since spreads the slots over the whole period instead
     const spread = await call('get_telegram_feed', { all_channels: true, since: ago(3 * 86400), limit: 3 })
     assertEquals(spread.posts.map((p: Json) => p.link.split('/').pop()), ['1011', '1012', '1020'])
+  })
+})
+
+// Gated posts (msg_id 3000+): what telegram-ingest's gate writes, removed afterwards
+async function withGatedPosts(fn: () => Promise<void>) {
+  const gated = { gate_version: 'v5', gated_at: '2026-11-14T00:00:00Z' }
+  const { error } = await admin.from('telegram_messages').insert([
+    { username: 'testchannel_b', msg_id: 3001, ts: '2026-11-13T03:00:00Z', text: '엔비디아 실적, 테스트 IPO 흥행', label: 'market', us_tickers: ['NVDA'], events: ['test-ipo'], ...gated },
+    { username: 'testchannel_b', msg_id: 3002, ts: '2026-11-13T04:00:00Z', text: '오늘 점심 뭐 먹지 HBM', label: 'noise', us_tickers: [], events: [], ...gated },
+  ])
+  if (error) throw new Error(error.message)
+  try {
+    await fn()
+  } finally {
+    await admin.from('telegram_messages').delete().gte('msg_id', 3000)
+  }
+}
+
+test('get_telegram_feed: noise is hidden unless asked for; US ticker and event filters', async () => {
+  await withGatedPosts(async () => {
+    const all = await call('get_telegram_feed', { all_channels: true, since: '2026-11-01' })
+    assertEquals(all.posts.map((p: Json) => p.link.split('/').pop()), ['3001', '2', '1', '1']) // not 3002
+    const p = all.posts[0]
+    assertEquals([p.us_stocks, p.events, p.noise], [[{ ticker: 'NVDA', name: 'NVIDIA Corporation' }], ['test-ipo'], undefined])
+
+    const withNoise = await call('get_telegram_feed', { all_channels: true, since: '2026-11-01', include_noise: true })
+    assertEquals(withNoise.posts[0].link, 'https://t.me/testchannel_b/3002')
+    assertEquals(withNoise.posts[0].noise, true)
+
+    const us = await call('get_telegram_feed', { all_channels: true, us_stock: 'nvda', since: '2026-11-01' })
+    assertEquals(us.posts.map((x: Json) => x.link), ['https://t.me/testchannel_b/3001'])
+    const ev = await call('get_telegram_feed', { all_channels: true, event: 'test-ipo', since: '2026-11-01' })
+    assertEquals(ev.posts.map((x: Json) => x.link), ['https://t.me/testchannel_b/3001'])
+
+    assertStringIncludes((await call('get_telegram_feed', { us_stock: 'ZZZZ' })).error, 'Unknown US ticker')
+    assertStringIncludes((await call('get_telegram_feed', { event: 'no-such-event' })).error, 'Unknown event')
+  })
+})
+
+test('search_telegram: hides noise, filters by US ticker', async () => {
+  await withGatedPosts(async () => {
+    const hbm = await call('search_telegram', { query: 'HBM', since: '2026-11-01' })
+    assertEquals(hbm.count, 2) // the seed's two; not the noise post
+    assertEquals((await call('search_telegram', { query: 'HBM', since: '2026-11-01', include_noise: true })).count, 3)
+    const us = await call('search_telegram', { query: '실적', us_stock: 'NVDA', since: '2026-11-01' })
+    assertEquals(us.posts.map((x: Json) => x.link), ['https://t.me/testchannel_b/3001'])
+  })
+})
+
+test('find_us_stock: by ticker and by English name; list_telegram_events', async () => {
+  assertEquals((await call('find_us_stock', { query: 'msft' })).map((r: Json) => r.ticker), ['MSFT'])
+  assertEquals((await call('find_us_stock', { query: 'nvidia' })).map((r: Json) => r.ticker), ['NVDA'])
+  // "MS" is Morgan Stanley's ticker; the name match (Microsoft) comes after the exact ticker
+  assertEquals((await call('find_us_stock', { query: 'ms' }))[0].ticker, 'MS')
+  await withGatedPosts(async () => {
+    const ev = await call('list_telegram_events')
+    assertEquals(ev.map((e: Json) => [e.id, e.posts, e.active]), [['test-ipo', 1, true]])
   })
 })
 

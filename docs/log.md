@@ -710,15 +710,76 @@ What was done and why. Oldest first; new entries go at the bottom.
   `daily_prices_code_date_idx`. The `history` step took ~500 ms for 3 calls after an hour idle (12:27) and 45–90 ms
   for 3 calls 50 s later; PERF-1's 1.5 s (n=3) was all after-idle calls. Moved to the cold-calls item below.
 
+## 2026-11-19 — analyze_stock's quote: no rate-limit waits
+- **Checked:** quotes during a kis-ingest burst. 3 `analyze_stock` calls landed at 12:50:09, inside the 12:50 run's
+  KIS phase (~12:50:03–12:50:14.5; the run itself got 3 rate-limit answers, within its usual 1–9): `kis_quote`
+  657–753 ms, no `kis_rate_limited` step, the same as quotes with no run going (572–778 ms). No quote with timings
+  has had a rate-limit wait (0 of 10, 3 during a burst). So shortening the quote's backoff, pacing kis-ingest more,
+  or a separate KIS app key aren't needed.
+- **Found:** `analyze_stock`'s ~1.1 s is the stored-token lookup (`kis_token`: ~400 ms after idle, ~70 ms warm; the
+  quote waits for it) and the quote itself (~650 ms). The first is the after-idle warm-up (cold-calls item below).
+  The second is mostly opening a new connection to KIS, not the distance: in the 11-19 bench, 40 of 51 quotes took
+  125–152 ms on a reused connection and 11 took 533–746 ms on a new one; real calls minutes apart always pay it.
+
+## 2026-11-19 — krx-ingest in Seoul: loading run 46 s; tool_calls kept
+- **Checked:** the first loading run in Seoul with parallel markets (08:00, loaded 11-18, 2,771 rows): 46.5 s, against
+  126 s from Mumbai on 11-18. KRX calls 35.2 s wall (KOSPI 35.2 s for 276 KB, KOSDAQ 25.1 s for 548 KB, in
+  parallel), upsert 5.6 s (Seoul → the database), the KIS comparison read 1.6 s and the cleanup 0.6 s (both removed
+  since, today). The KRX calls are KRX's own time: the same calls take 0.1–0.3 s for today's date (nothing yet) and
+  ~11 s for a published-but-not-ready day. Runs that load nothing: 3–16 s. kis-ingest today: max 21 s (n=46). ING-1
+  met: 46 s against the 112 s that leaves 25% of the 150 s limit.
+- **Decided:** `tool_calls` has no retention: few users, and it's the record of real usage (the latency and size
+  findings above came from it). CAP-4 updated.
+
+## 2026-11-19 — Warm bench after the feed function
+- **Ran:** `deno task bench` (n=50, 5 rounds, 60 s pauses), 12:57–13:05 KST, during the session (so with KIS quotes).
+  It landed in ap-northeast-2 (no `--region`), so end-to-end totals aren't comparable with PERF-6's us-east-1
+  baselines; the server-side numbers are.
+- **Found:** warm server p95 (each round's first call excluded, n=45): Tier A 71–203 ms (history 71, feed(1h) 203
+  against 453 on 11-17), Tier B analyze 770, screen 406. PERF-5 met.
+- **Found:** each round's first call, after only a 60 s pause, pays the database connection warm-up (feed(1h)
+  374–724 ms, its first steps ~450–600 ms each in parallel). So an open connection doesn't survive a minute idle.
+- **Found:** KIS quotes are bimodal: 125–152 ms on a reused connection (40 of 51), 533–746 ms on a new one (11 of 51).
+  None was rate-limited, though the bench overlapped the 13:00 and 13:05 kis-ingest runs.
+
+## 2026-11-19 — Telegram gate in production (built, not deployed yet)
+- **Done:** telegram-ingest gates posts after polling (`telegram-ingest/gating.ts`, prompt and checks in
+  `_shared/gate.ts`, shared with `scripts/tg_gate.ts`, so the experiment and production can't drift). The newest posts
+  with `gated_at` null, 40 per run, 8 calls at a time: label, `stock_codes` (checked KR codes), `us_tickers`, `events`,
+  `gate_version`, `gated_at` (migration `20261119000000`). No tags table. Posts with no text are noise without a call.
+  **Why:** the experiment (prompt v5) held up on 741 posts.
+- **Done:** one rule re-gates: `gated_at = null`. A trigger sets it when a post's text changes; adding or changing an
+  event (`telegram_events`) sets it for the posts since its `active_from` (or the last 7 days). The ~1,000 stored posts
+  (back to 2026-08-03) are gated the same way, newest first: ~2 hours after deploy, ~$0.20.
+- **Done:** failures. A failed call leaves the post ungated (shown, untagged) for the next run; a run where every call
+  fails (key, outage) returns 500 with `gate.error`, which alerts once an hour like a failed run.
+- **Done:** `us_symbols` (Nasdaq Trader's two files, ETFs and test issues dropped, ~7,450 rows), refreshed by
+  telegram-ingest when a day old; a list under 5,000 rows is refused and the stored one kept. Delisted tickers drop out.
+- **Done:** mcp. Noise is hidden from `get_telegram_feed` (the `telegram_feed` SQL function, v2) and `search_telegram`;
+  `include_noise: true` shows it (`noise: true`). Both filter by `us_stock` and `event`, and posts list `us_stocks`
+  (ticker, name) and `events`. New tools: `find_us_stock` (ticker or English name; Korean names aren't searchable, the
+  calling model translates) and `list_telegram_events`.
+- **Done:** the name matcher (`tagStocks`, the stock index) is out of production: posts are stored untagged and the gate
+  tags them, so a new post has no tags for up to one run (5 minutes). It lives in `scripts/name_matcher.ts`, with its
+  tests, as the experiment's baseline. `STOCK_ALIASES` moved to `gate.ts` (the KR check uses it). The `?retag=1`
+  endpoint is gone (deprecated).
+- Tests: `gate_test.ts` (the checks, with the experiment's cases: MS/Microsoft, 록랩, SK하이닉스 ADR, 현대차, 아울렛);
+  db_test: the trigger, an event re-gating, `gateBatch` with a stand-in client (written-back tags, an empty post, every
+  call failing), `refreshUsSymbols`; mcp_test: noise hiding, the US and event filters, the two new tools. 136 unit, 37
+  DB, 45 MCP tests pass.
+- **Done:** the daily report has a gate line under the Telegram one: posts gated in the 24 hours, the noise share,
+  failed calls, the backlog after the last run, and tokens with their cost at Haiku's price, e.g. "✅ Telegram gate:
+  120 posts gated, 15% noise (18) · 180K in / 12K out tokens ≈ $0.02". No line when no run gated (no key).
+- **Done:** `telegram-ingest?gate=500`: no polling, gates up to 500 ungated posts at once (new calls stop after 100 s,
+  inside the 150 s limit). For the posts stored before the gate, instead of draining at 40 per run.
+- To deploy: `ANTHROPIC_API_KEY` secret, `supabase db push`, deploy telegram-ingest, mcp and pipeline-report, then
+  `?gate=500` twice for the stored posts, then add events.
+
 ## Open
-- After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,
-  shorten the quote's backoff (one request needs little of the per-second budget), pace `kis-ingest`'s burst, or use
-  a separate KIS app key for quotes.
-- `get_telegram_feed` with a short window (PERF-5, PERF-6): the 1h/30-post case had a warm tool p95 of 453 ms and an
-  end-to-end p95 of 1.7 s (11-17, before the `telegram_feed` function). Re-measure with a warm `deno task bench`.
-- `tool_calls` has no retention (CAP-4): add a cleanup next to `pipeline-report`'s 90-day delete of `ingest_runs`.
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
-  next to the database, every minute) vs. moving the project to us-east-1. Then `screen_stocks`' cold SQL (1.3–1.9 s
+  next to the database, every minute) vs. moving the project to us-east-1. A ping every minute would keep workers
+  alive (the boot), but probably not the database connection: in the 11-19 bench, calls after a 60 s pause already
+  paid its ~400–600 ms setup. Then `screen_stocks`' cold SQL (1.3–1.9 s
   against ~0.25 s warm): `explain (analyze, buffers)` right after an idle period, to see if it's reading from disk.
   - Also a smaller warm-up with no worker boot: the first database call after an idle period costs ~400–500 ms
     against 45–90 ms warm (11-19: `get_stock_history` 495–503 ms at 12:27 after an hour idle, 45–90 ms at 12:28;
@@ -726,9 +787,16 @@ What was done and why. Oldest first; new entries go at the bottom.
     p50 70 / p90 127 for later ones. History pays it on every after-idle call because it's its only step, so its
     PERF-1 number (1.5 s, n=3) is this warm-up, not the tool. A keep-warm ping would cover both; re-measure PERF-1
     separating warm from after-idle calls.
-- krx-ingest (ING-1: 126 s on 11-18, 24 s from the limit): tomorrow's loading run (07:00–08:30) is the first in
-  Seoul with parallel markets; check `summary->'timings'` (`ran_in`, per-call `ms`/`kb`, `upsert_ms`), then update
-  ING-1.
+  - `analyze_stock` pays it in the stored-token lookup (`kis_token` ~400 ms after idle, ~70 ms warm), which the KIS
+    quote waits for.
+  - `get_telegram_feed` too: real calls since the `telegram_feed` function (11-18 12:32 – 11-19 12:24, all with the
+    default window) are p50 106 ms when another call came < 5 min before (n=99) and p50 553 / p95 811 ms after idle
+    (n=15); the `messages` query is 40–90 ms warm, and the slow ones are the first steps (`user_channels`,
+    `latest_trading_day`, `backfill_state` ~400–500 ms). The "warm" p95 (676 ms) includes parallel bursts (5 calls at
+    22:23, ~1 s each), where each call sets up its own connection. PERF-5/6's 1h/30-post case (453 ms warm tool p95,
+    1.7 s end to end, 11-17) predates the function. Re-measured on 11-19: warm server p95 203 ms (PERF-5 met);
+    end to end (PERF-6) still needs `deno task bench --region us-east-1`, best after 15:30 (`analyze_stock` then
+    makes no KIS calls).
 - Load benchmark (`bench:load`, not built): latency and errors vs. concurrency (1 → 5 → 10 → 25 → 50) to find the
   knee and the first bottleneck (Postgres connections or compute, PostgREST, Edge workers, the forward hop), using
   the per-step `timings`. Database-backed read-only tools only, outside the session (no KIS or t.me calls), via the
@@ -737,3 +805,5 @@ What was done and why. Oldest first; new entries go at the bottom.
   is measured from the previous close (`close - change` = the previous day's `daily_prices.close` for traded rows).
   If KIS measures it from today's 종가, `fluc_rt` in screens is wrong after 16:00. Also check tonight's report for the
   `live_prices` cleanup.
+- Telegram gate, after deploy: watch the backlog drain (`gate.left` in telegram-ingest's `ingest_runs` summary), the
+  failure count, and the first `us_symbols` refresh; spot-check hidden noise with `include_noise: true`.

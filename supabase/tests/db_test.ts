@@ -228,7 +228,7 @@ Deno.test('trading_days follows inserts and deletes on daily_prices', async () =
 // Runs the real syncChannel on the local DB with t.me answered by a fake page (fetch is stubbed for t.me only; the
 // Supabase client still talks to the local stack). Seeded testchannel_a has posts 1 and 2.
 
-import { buildStockIndex, syncChannel } from '../functions/_shared/telegram.ts'
+import { syncChannel } from '../functions/_shared/telegram.ts'
 
 const post = (id: number, textClass: string, msgClass = 'tgme_widget_message') => `
 <div class="${msgClass}" data-post="testchannel_a/${id}">
@@ -248,7 +248,7 @@ async function syncWithPage(html: string) {
     return realFetch(input, init)
   }) as typeof fetch
   try {
-    return await syncChannel(db, 'testchannel_a', () => Promise.resolve(buildStockIndex([])), { maxPages: 1 })
+    return await syncChannel(db, 'testchannel_a', { maxPages: 1 })
   } finally {
     globalThis.fetch = realFetch
   }
@@ -341,7 +341,6 @@ const bfPage = (before?: number) => {
   </div>
 </div>`).join(''))
 }
-const bfIndex = () => Promise.resolve(buildStockIndex([{ isu_cd: '900001', isu_nm: '돌파전자' }]))
 
 // Runs fn with t.me/s/testchannel_bf answered by the fake channel (or by `answer`, e.g. a redirect), and the channel
 // row present; removes the channel and its posts afterwards. Returns the pages requested (before= values).
@@ -371,7 +370,7 @@ async function withBfChannel(fn: (requested: (number | null)[]) => Promise<void>
 async function bfState() {
   const { data } = await db.from('telegram_channels')
     .select('backfill_before, backfill_oldest_ts, backfill_since, backfill_pages, last_msg_id').eq('username', BF).single()
-  const { data: msgs } = await db.from('telegram_messages').select('msg_id, stock_codes').eq('username', BF).order('msg_id')
+  const { data: msgs } = await db.from('telegram_messages').select('msg_id, stock_codes, gated_at').eq('username', BF).order('msg_id')
   return { ...data!, ids: (msgs ?? []).map((m) => m.msg_id), msgs: msgs ?? [] }
 }
 
@@ -381,31 +380,32 @@ const bfTest = (name: string, fn: () => Promise<void>) =>
 bfTest('first page only, then the background part stops at the 8-page cap', async () => {
   await withBfChannel(async (requested) => {
     const since = '2026-01-01T00:00:00Z' // far back: the page cap ends it
-    const r = await syncChannel(db, BF, bfIndex, { sinceTs: since, maxPages: 1 })
+    const r = await syncChannel(db, BF, { sinceTs: since, maxPages: 1 })
     assertEquals([r.ok, r.pages, r.new_posts, r.backfill_pending], [true, 1, 20, true], r.error)
     let s = await bfState()
     assertEquals([s.backfill_before, s.backfill_pages, s.last_msg_id], [181, 1, 200])
     assertEquals(new Date(s.backfill_oldest_ts!).toISOString(), bfTs(181))
     assertEquals(s.ids.length, 20)
 
-    const b = await backfillChannel(db, BF, bfIndex, { pauseMs: 0 })
+    const b = await backfillChannel(db, BF, { pauseMs: 0 })
     assertEquals([b.ok, b.pages, b.new_posts, b.done], [true, 7, 140, true], b.error)
     assertEquals(requested, [null, 181, 161, 141, 121, 101, 81, 61])
     s = await bfState()
     assertEquals([s.backfill_before, s.backfill_oldest_ts, s.backfill_since, s.backfill_pages], [null, null, null, 8])
     assertEquals([s.ids.length, s.ids[0], s.ids.at(-1)], [160, 41, 200])
-    assert(s.msgs.every((m) => m.stock_codes.includes('900001')), 'backfilled posts are tagged')
+    // stored untagged: the gate (telegram-ingest) tags them
+    assert(s.msgs.every((m) => !m.stock_codes.length && m.gated_at === null), 'backfilled posts wait for the gate')
 
     // Nothing pending any more: a second call fetches nothing
-    const again = await backfillChannel(db, BF, bfIndex, { pauseMs: 0 })
+    const again = await backfillChannel(db, BF, { pauseMs: 0 })
     assertEquals([again.done, again.pages, requested.length], [true, 0, 8])
   })
 })
 
 bfTest('stops once posts reach the 30-day mark', async () => {
   await withBfChannel(async (requested) => {
-    await syncChannel(db, BF, bfIndex, { sinceTs: bfTs(145), maxPages: 1 })
-    const b = await backfillChannel(db, BF, bfIndex, { pauseMs: 0 })
+    await syncChannel(db, BF, { sinceTs: bfTs(145), maxPages: 1 })
+    const b = await backfillChannel(db, BF, { pauseMs: 0 })
     assertEquals([b.ok, b.pages, b.done], [true, 2, true], b.error) // 161–180, then 141–160 reaches post 145
     assertEquals(requested, [null, 181, 161])
     assertEquals((await bfState()).backfill_before, null)
@@ -414,7 +414,7 @@ bfTest('stops once posts reach the 30-day mark', async () => {
 
 bfTest('a first page that already reaches the 30-day mark leaves no backfill', async () => {
   await withBfChannel(async (requested) => {
-    const r = await syncChannel(db, BF, bfIndex, { sinceTs: bfTs(190), maxPages: 1 }) // posts 181–200 reach post 190
+    const r = await syncChannel(db, BF, { sinceTs: bfTs(190), maxPages: 1 }) // posts 181–200 reach post 190
     assertEquals([r.ok, r.backfill_pending], [true, undefined], r.error)
     assertEquals((await bfState()).backfill_before, null)
     assertEquals(requested, [null])
@@ -423,15 +423,15 @@ bfTest('a first page that already reaches the 30-day mark leaves no backfill', a
 
 bfTest('resume claims only a stalled backfill, and continues from saved progress', async () => {
   await withBfChannel(async (requested) => {
-    await syncChannel(db, BF, bfIndex, { sinceTs: '2026-01-01T00:00:00Z', maxPages: 1 })
+    await syncChannel(db, BF, { sinceTs: '2026-01-01T00:00:00Z', maxPages: 1 })
     // Just started (backfill_at = now): the background job owns it
-    const busy = await backfillChannel(db, BF, bfIndex, { resume: true, pauseMs: 0 })
+    const busy = await backfillChannel(db, BF, { resume: true, pauseMs: 0 })
     assertEquals([busy.pages, busy.skipped], [0, 'no stalled backfill (done, or still running)'])
     // Interrupted after 3 pages in all: idle for 10 minutes, next page before post 141
     await db.from('telegram_channels')
       .update({ backfill_before: 141, backfill_pages: 3, backfill_at: new Date(Date.now() - 600_000).toISOString() })
       .eq('username', BF)
-    const r = await backfillChannel(db, BF, bfIndex, { resume: true, pauseMs: 0 })
+    const r = await backfillChannel(db, BF, { resume: true, pauseMs: 0 })
     assertEquals([r.ok, r.pages, r.done], [true, 5, true], r.error)
     assertEquals(requested.slice(1), [141, 121, 101, 81, 61])
   })
@@ -440,9 +440,9 @@ bfTest('resume claims only a stalled backfill, and continues from saved progress
 bfTest('a failing page keeps the backfill pending but counts towards the cap', async () => {
   let fail = false
   await withBfChannel(async () => {
-    await syncChannel(db, BF, bfIndex, { sinceTs: '2026-01-01T00:00:00Z', maxPages: 1 })
+    await syncChannel(db, BF, { sinceTs: '2026-01-01T00:00:00Z', maxPages: 1 })
     fail = true
-    const r = await backfillChannel(db, BF, bfIndex, { pauseMs: 0 })
+    const r = await backfillChannel(db, BF, { pauseMs: 0 })
     assertEquals([r.ok, r.pages, r.done], [false, 1, false])
     assert(r.error?.includes('no public preview'), r.error)
     const s = await bfState()
@@ -626,5 +626,144 @@ Deno.test('monitored: alertOn skips the hourly alert for some failures (telegram
     assert(alerts[0].includes('db down'), alerts[0])
   } finally {
     await db.from('ingest_runs').delete().eq('job', job)
+  }
+})
+
+// ---- Telegram gate (migration 20261119000000, telegram-ingest/gating.ts) ----
+
+import type Anthropic from 'npm:@anthropic-ai/sdk@1.5.0'
+import { gateBatch, refreshUsSymbols } from '../functions/telegram-ingest/gating.ts'
+
+const GATE_CH = 'testchannel_a'
+const gatePost = (msg_id: number, text: string, extra: Record<string, unknown> = {}) =>
+  ({ username: GATE_CH, msg_id, ts: `2026-11-1${msg_id % 2 ? 4 : 5}T00:00:00Z`, text, ...extra })
+async function withGatePosts(rows: Record<string, unknown>[], fn: () => Promise<void>) {
+  const { error } = await db.from('telegram_messages').insert(rows)
+  if (error) throw new Error(error.message)
+  try {
+    await fn()
+  } finally {
+    await db.from('telegram_messages').delete().eq('username', GATE_CH).gte('msg_id', 2000)
+  }
+}
+const getPost = async (msg_id: number) =>
+  (await db.from('telegram_messages').select('text, label, stock_codes, us_tickers, events, gate_version, gated_at')
+    .eq('username', GATE_CH).eq('msg_id', msg_id).single()).data!
+
+Deno.test('gate trigger: a page stored again keeps the tags; an edit resets gated_at', async () => {
+  const gated = { label: 'market', stock_codes: ['900001'], gate_version: 'v5', gated_at: '2026-11-15T00:00:00Z' }
+  await withGatePosts([gatePost(2001, '돌파전자 강세', gated)], async () => {
+    // a page fetched again, upserted as storePosts does (no gate columns)
+    await db.from('telegram_messages').upsert({ ...gatePost(2001, '돌파전자 강세'), views: 5 }, { onConflict: 'username,msg_id' })
+    assertEquals((await getPost(2001)).stock_codes, ['900001'])
+    assert((await getPost(2001)).gated_at)
+    // an edit: gated again on the next run
+    await db.from('telegram_messages').update({ text: '돌파전자 급락' }).eq('username', GATE_CH).eq('msg_id', 2001)
+    assertEquals((await getPost(2001)).gated_at, null)
+  })
+})
+
+Deno.test('gate: adding an event re-gates the posts from its start', async () => {
+  const gated = { label: 'market', gate_version: 'v5', gated_at: '2026-11-15T00:00:00Z' }
+  await withGatePosts([gatePost(2003, 'a', { ...gated, ts: '2026-11-14T00:00:00Z' }), gatePost(2005, 'b', { ...gated, ts: '2026-10-01T00:00:00Z' })], async () => {
+    const { error } = await db.from('telegram_events').insert({ id: 'test-regate', description: 'x', active_from: '2026-11-10T00:00:00Z' })
+    if (error) throw new Error(error.message)
+    try {
+      assertEquals((await getPost(2003)).gated_at, null) // after active_from
+      assert((await getPost(2005)).gated_at) // before: untouched
+    } finally {
+      await db.from('telegram_events').delete().eq('id', 'test-regate')
+    }
+  })
+})
+
+// A stand-in for the Anthropic client: answers every post with `answer`, or fails
+function fakeClaude(answer: (text: string) => unknown | Error) {
+  const calls: string[] = []
+  const client = {
+    messages: {
+      create: (req: { messages: { content: string }[] }) => {
+        const text = req.messages[0].content
+        calls.push(text)
+        const a = answer(text)
+        if (a instanceof Error) return Promise.reject(a)
+        return Promise.resolve({
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: JSON.stringify(a) }],
+          usage: { input_tokens: 100, output_tokens: 20 },
+        })
+      },
+    },
+  }
+  return { client: client as unknown as Anthropic, calls }
+}
+
+Deno.test({
+  name: 'gateBatch: labels and checked tags are written back; an empty post is noise without a call',
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    // Only the test posts are ungated during the test (the seed's are marked gated, then put back)
+    const { data: seedRows } = await db.from('telegram_messages').select('username, msg_id').is('gated_at', null)
+    const mark = (at: string | null) =>
+      Promise.all((seedRows ?? []).map((r) => db.from('telegram_messages').update({ gated_at: at }).eq('username', r.username).eq('msg_id', r.msg_id)))
+    await mark('2026-11-15T00:00:00Z')
+    try {
+      await withGatePosts([gatePost(2007, '엔비디아, 돌파전자 상승. MS 강세'), gatePost(2009, '')], async () => {
+        const { client, calls } = fakeClaude(() => ({
+          label: 'market',
+          companies: [
+            { written: '엔비디아', listed_name: 'NVIDIA', market: 'US', id: 'NVDA' },
+            { written: '돌파전자', listed_name: '돌파전자', market: 'KR', id: '999999' }, // wrong code, right name
+            { written: 'MS', listed_name: 'Microsoft', market: 'US', id: 'MS' }, // corrected to MSFT
+          ],
+          events: ['test-ipo', 'not-an-event'],
+        }))
+        const sum = await gateBatch(db, client, 10)
+        assertEquals([sum.gated, sum.noise, sum.failed, sum.left, calls.length], [2, 1, 0, 0, 1])
+        const p = await getPost(2007)
+        assertEquals([p.label, p.stock_codes, p.us_tickers, p.events, p.gate_version], ['market', ['900001'], ['MSFT', 'NVDA'], ['test-ipo'], 'v5'])
+        assertEquals((await getPost(2009)).label, 'noise')
+      })
+
+      // Every call failing is reported as a gate error (the run fails and alerts); the post stays ungated
+      await withGatePosts([gatePost(2011, 'x'), gatePost(2013, 'y'), gatePost(2015, 'z')], async () => {
+        const { client } = fakeClaude(() => new Error('401 invalid x-api-key'))
+        const sum = await gateBatch(db, client, 10)
+        assertEquals([sum.gated, sum.failed, sum.left], [0, 3, 3])
+        assert(sum.error?.includes('every call failed') && sum.error.includes('invalid x-api-key'), sum.error)
+      })
+    } finally {
+      await mark(null)
+    }
+  },
+})
+
+Deno.test('refreshUsSymbols: replaces the list daily, refuses a list that came back cut', async () => {
+  const file = (rows: string[], header: string) => [header, ...rows, 'File Creation Time: 1119202608:01||||||'].join('\n')
+  const NASDAQ = 'Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares'
+  const OTHER = 'ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol'
+  const many = Array.from({ length: 5000 }, (_, i) => `T${String(i).padStart(4, '0')}|Test Corp ${i} - Common Stock|Q|N|N|100|N|N`)
+  const fetcher = (rows: string[]) => ((url: string) =>
+    Promise.resolve(new Response(url.includes('nasdaqlisted')
+      ? file(['NVDA|NVIDIA Corporation - Common Stock|Q|N|N|100|N|N', ...rows], NASDAQ)
+      : file(['MS|Morgan Stanley Common Stock|N|MS|N|100|N|MS'], OTHER)))) as unknown as typeof fetch
+  const { data: before } = await db.from('us_symbols').select('ticker, name, exchange')
+  try {
+    // fresh list (seeded now): nothing to do
+    assertEquals(await refreshUsSymbols(db, fetcher(many)), { refreshed: false })
+    await db.from('us_symbols').update({ updated_at: '2026-01-01T00:00:00Z' }).neq('ticker', '')
+    // a cut list is refused and the stored one kept
+    let msg = ''
+    await refreshUsSymbols(db, fetcher([])).catch((e) => (msg = e.message))
+    assert(msg.includes('only 2 US symbols'), msg)
+    assertEquals((await db.from('us_symbols').select('ticker', { count: 'exact', head: true })).count, before!.length)
+    // a full list replaces it: MSFT isn't in these files, so it's gone (delisted)
+    assertEquals(await refreshUsSymbols(db, fetcher(many)), { refreshed: true, symbols: 5002 })
+    const { data: msft } = await db.from('us_symbols').select('ticker').eq('ticker', 'MSFT')
+    assertEquals(msft, [])
+  } finally {
+    await db.from('us_symbols').delete().neq('ticker', '')
+    await db.from('us_symbols').insert(before!)
   }
 })

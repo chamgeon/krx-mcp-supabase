@@ -142,6 +142,59 @@ supabase secrets set TELEGRAM_BOT_TOKEN=<bot token> TELEGRAM_CHAT_ID=<chat id>
 
 Without them nothing is sent (the message goes to the function logs).
 
+For the Telegram gate (telegram-ingest labels each post market or noise, hides noise, and tags KR stocks, US tickers
+and events with Claude Haiku; about $0.40/month at ~90 posts a day): an Anthropic API key, from a key you create for
+this deployment.
+
+```bash
+supabase secrets set ANTHROPIC_API_KEY=<Anthropic API key>
+```
+
+Without it posts are stored and shown, but not labeled or tagged. Events to tag are rows of `telegram_events`; adding
+one re-tags the posts since `active_from` (SQL below).
+
+To gate the posts stored before the gate at once (instead of 40 per 5-minute run), call `telegram-ingest?gate=500`
+until its `gate.left` is 0.
+
+#### Telegram gate: useful SQL
+
+Run in the SQL editor, or `supabase db query --remote "<sql>"`. Re-gating is always `gated_at = null`: telegram-ingest
+gates those posts again, newest first, 40 per run (or at once with `?gate=500`).
+
+```sql
+-- Events: add one (re-tags posts since active_from, or the last 7 days if null); '' is an apostrophe
+insert into telegram_events (id, description, active_from)
+values ('anthropic-ipo', 'Anthropic''s IPO (상장): listing, pricing, demand, first trading day, valuation, effect on other stocks', '2026-11-01');
+-- change what it covers (re-tags too), end it (tagged posts keep the tag), list with post counts
+update telegram_events set description = '...' where id = 'anthropic-ipo';
+update telegram_events set active_to = now() where id = 'anthropic-ipo';
+select e.id, e.active_from, e.active_to, count(m.msg_id) as posts
+from telegram_events e left join telegram_messages m on m.events @> array[e.id]
+group by e.id order by e.created_at desc;
+
+-- Ungated posts: how many, and which (the order the gate takes them)
+select count(*) from telegram_messages where gated_at is null;
+select username, msg_id, ts, left(text, 80) as text from telegram_messages where gated_at is null order by ts desc limit 50;
+-- the gate per run: gated, backlog left, errors
+select started_at, summary->'gate'->>'gated' as gated, summary->'gate'->>'left' as left_ungated, summary->'gate'->'errors' as errors
+from ingest_runs where job = 'telegram-ingest' order by started_at desc limit 10;
+
+-- Noise: the share per channel, and the posts to review (also: get_telegram_feed with include_noise: true)
+select username, count(*) filter (where label = 'noise') as noise, count(*) as posts from telegram_messages group by 1 order by 3 desc;
+select username, msg_id, has_media, left(text, 100) as text from telegram_messages
+where label = 'noise' and btrim(text) <> '' order by ts desc limit 50;
+
+-- US symbols: when the list was last refreshed, and whether a ticker is listed
+select max(updated_at), count(*) from us_symbols;
+select * from us_symbols where ticker = 'NVDA' or name ilike '%nvidia%';
+
+-- Re-gate: after a new listing appears (its earlier mentions were rejected), after changing an alias list or the
+-- prompt, or one channel
+update telegram_messages set gated_at = null where ts >= '2026-11-12' and text ~* '앤트로픽|anthropic';
+update telegram_messages set gated_at = null where ts >= now() - interval '30 days';
+update telegram_messages set gated_at = null where username = 'insidertracking';
+```
+
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided to Edge Functions automatically.
 
 ### 4. Deploy the functions
@@ -258,7 +311,7 @@ Three suites, from fastest to most complete. None of them touch production, KIS,
 
 | Command | What | Needs |
 |---|---|---|
-| `deno task test` | Unit tests next to the code (`*_test.ts`): `analyze()`, Telegram parsing and stock tagging, KIS helpers | nothing |
+| `deno task test` | Unit tests next to the code (`*_test.ts`): `analyze()`, Telegram parsing, the gate's checks, KIS helpers (and the experiment's name matcher) | nothing |
 | `deno task test:db` | `screen_stocks`, the `prices` / `available_dates` views, the `trading_days` triggers, and `screen_stocks` vs. `analyze()` agreement (`supabase/tests/db_test.ts`) | local stack |
 | `deno task test:mcp` | Every MCP tool over HTTP with the official MCP client, auth (401, `?key=`, a real user token), usage logging (`supabase/tests/mcp_test.ts`) | local stack + served function |
 
