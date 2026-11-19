@@ -51,9 +51,24 @@ export function parseKisRows(
 }
 
 /**
+ * Stocks whose price is an expected price from a call auction (예상체결가), not a trade, by KIS's hour_cls_code:
+ * '0' 예상체결 없음 (a traded price in the regular session), 'B' 정규장전 예상체결 (the pre-open auction), 'A' 정규장후
+ * 예상체결 (after the regular close: the closing auction and the 16:00–20:00 after-market), 'C' 장중 예상체결 (VI).
+ * code → hour_cls_code, for
+ * the codes other than '0'. An expected price can sit outside the day's traded range (before the open there's no
+ * range at all), so these rows are left out of the range check.
+ */
+export function auctionCodes(output: Record<string, string>[] | undefined): Map<string, string> {
+  return new Map(
+    (output ?? []).filter((r) => r.hour_cls_code && r.hour_cls_code !== '0').map((r) => [r.inter_shrn_iscd, r.hour_cls_code]),
+  )
+}
+
+/**
  * Problems with a whole-market snapshot, empty when it looks right (checks in ../_shared/validate.ts). `requested` is
  * the size of the stock list asked for; a few codes come back empty (delisted since), many missing means trouble.
+ * `auction`: auctionCodes() of the responses, left out of the range check.
  */
-export function kisSnapshotProblems(rows: ReturnType<typeof parseKisRows>, requested: number): string[] {
-  return rowProblems(rows, { minRows: Math.floor(requested * 0.95) })
+export function kisSnapshotProblems(rows: ReturnType<typeof parseKisRows>, requested: number, auction?: Map<string, string>): string[] {
+  return rowProblems(rows, { minRows: Math.floor(requested * 0.95), auction: auction && new Set(auction.keys()) })
 }

@@ -5,7 +5,7 @@
 
 import { assert, assertEquals } from 'jsr:@std/assert@1.0.19'
 import { krxItems, parseKrxRows } from '../krx-ingest/parse.ts'
-import { kisSnapshotProblems, parseKisRows, type Prev } from './parse.ts'
+import { auctionCodes, kisSnapshotProblems, parseKisRows, type Prev } from './parse.ts'
 
 // The fixtures are gitignored (third-party data, public repo): fetch them with `deno task fixtures`. Without them these
 // tests are skipped, not failed, so a fresh clone and CI still pass.
@@ -135,4 +135,20 @@ fixtureTest('validation: a renamed code field (nothing matches the stock list) i
 
 Deno.test('validation: an empty snapshot is refused', () => {
   assertEquals(kisSnapshotProblems([], 2770), ['only 0 rows (expected at least 2631)'])
+})
+
+fixtureTest('auction codes: mid-session, only the stocks in a VI auction', () => {
+  // 3 of the day's big-moving preferred shares, hour_cls_code 'C' with an expected volume (intr_antc_vol)
+  assertEquals([...auctionCodes(output)].sort(), [['001527', 'C'], ['004545', 'C'], ['36328K', 'C']])
+})
+
+Deno.test('auction codes: rows KIS marks as expected prices (hour_cls_code not 0)', () => {
+  const out: Record<string, string>[] = [
+    { inter_shrn_iscd: '005930', hour_cls_code: '0' },
+    { inter_shrn_iscd: '000660', hour_cls_code: 'B' },
+    { inter_shrn_iscd: '035420', hour_cls_code: 'C' },
+    { inter_shrn_iscd: '247540' }, // field missing: treated as traded
+  ]
+  assertEquals([...auctionCodes(out)], [['000660', 'B'], ['035420', 'C']])
+  assertEquals(auctionCodes(undefined).size, 0)
 })

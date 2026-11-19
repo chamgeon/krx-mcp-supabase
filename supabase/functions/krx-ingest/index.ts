@@ -1,7 +1,8 @@
 // Pulls KOSPI + KOSDAQ 일별매매정보 from the KRX Open API and stores it in public.daily_prices.
 //
 // Called by pg_cron (see sql/cron.sql). Protected by the x-ingest-secret header.
-// Replaces kis-ingest's same-day provisional rows (source = 'kis') with KRX's official numbers.
+// kis-ingest's rows for the same day stay in live_prices (the prices view shows KRX's once it has the day; pipeline-report
+// deletes old live_prices days).
 //
 //   POST /functions/v1/krx-ingest                         -> today + any weekday in the last 7 days not yet from KRX
 //   POST /functions/v1/krx-ingest?date=20261008           -> (re)load one day
@@ -10,12 +11,12 @@
 // KOSPI and KOSDAQ are fetched in parallel. The cron job calls this function with `x-region: ap-northeast-2`
 // (sql/cron.example.sql), so it runs in Seoul next to KRX: a day's two answers are large, and from Mumbai a loading run
 // took 126 s (11-18), most of it the KRX calls. The answer carries `timings` per day (each KRX call's time, size and
-// rows, the KIS comparison read, the upsert, the cleanup) and `ran_in`; the same goes into the running ingest_runs row
+// rows, the upsert) and `ran_in`; the same goes into the running ingest_runs row
 // after each day (run.progress), so a run stopped at the 150 s limit shows how far it got.
 
 import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
-import { compareKisKrx, type KisCheck, krxDayProblems, krxItems, parseKrxRows, type PriceRow, toIsoDate } from './parse.ts'
+import { krxDayProblems, krxItems, parseKrxRows, type PriceRow, toIsoDate } from './parse.ts'
 import { monitored, type RunContext } from '../_shared/ops.ts'
 
 const KRX_BASE = 'https://data-dbg.krx.co.kr/svc/apis/sto'
@@ -51,7 +52,7 @@ function todayKst(): Date {
 
 // Where a day's time went (ms); `krx` has one entry per market call
 type KrxCall = { market: string; ms: number; kb: number; rows: number }
-type DayTimings = { krx: KrxCall[]; krx_wall_ms?: number; kis_rows_ms?: number; upsert_ms?: number; cleanup_ms?: number }
+type DayTimings = { krx: KrxCall[]; krx_wall_ms?: number; upsert_ms?: number }
 
 const since = (t0: number) => Math.round(performance.now() - t0)
 
@@ -68,19 +69,7 @@ async function fetchMarket(path: string, basDd: string, calls: KrxCall[], market
   return items
 }
 
-// KIS's provisional rows for a day (its last snapshot), to compare with KRX's before they're replaced
-async function kisRowsOf(dayIso: string): Promise<{ isu_cd: string; close: number | null }[]> {
-  const out: { isu_cd: string; close: number | null }[] = []
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await supabase.from('live_prices').select('isu_cd, close').eq('bas_dd', dayIso)
-      .order('isu_cd').range(from, from + 999)
-    if (error) throw new Error(error.message)
-    out.push(...(data ?? []))
-    if (!data || data.length < 1000) return out
-  }
-}
-
-async function ingestDay(basDd: string, t: DayTimings): Promise<{ rows: number; kisCheck: KisCheck | null }> {
+async function ingestDay(basDd: string, t: DayTimings): Promise<number> {
   // The two markets are independent: fetched in parallel
   const w0 = performance.now()
   const [kospi, kosdaq]: PriceRow[][] = await Promise.all(
@@ -88,17 +77,12 @@ async function ingestDay(basDd: string, t: DayTimings): Promise<{ rows: number; 
   )
   t.krx_wall_ms = since(w0)
   // Refuse data that looks wrong (a renamed field, missing rows) before writing anything: the stored day and the KIS
-  // rows stay as they are, and the run fails with the reason
+  // stays as it is, and the run fails with the reason
   const problems = krxDayProblems(kospi, kosdaq, await previousDayCount(toIsoDate(basDd)))
   if (problems.length) throw new Error(`refused ${basDd}: ${problems.join('; ')}`)
   const rows = [...kospi, ...kosdaq]
-  // Before KRX's numbers replace KIS's, compare them (the report shows the result)
-  let t0 = performance.now()
-  const kisRows = rows.length ? await kisRowsOf(toIsoDate(basDd)) : []
-  if (rows.length) t.kis_rows_ms = since(t0)
-  const kisCheck = kisRows.length ? compareKisKrx(kisRows, rows) : null
   // Empty = holiday, or KRX hasn't published that day yet
-  t0 = performance.now()
+  const t0 = performance.now()
   for (let i = 0; i < rows.length; i += 1000) {
     const { error } = await supabase
       .from('daily_prices')
@@ -106,18 +90,7 @@ async function ingestDay(basDd: string, t: DayTimings): Promise<{ rows: number; 
     if (error) throw new Error(`upsert ${basDd}: ${error.message}`)
   }
   if (rows.length) t.upsert_ms = since(t0)
-  if (rows.length > 0) {
-    t0 = performance.now()
-    // The day is official now: drop kis-ingest's provisional rows for it. (The prices view already hides
-    // them once daily_prices has the day; this just keeps live_prices small.)
-    const { error } = await supabase
-      .from('live_prices')
-      .delete()
-      .eq('bas_dd', toIsoDate(basDd))
-    if (error) throw new Error(`cleanup ${basDd}: ${error.message}`)
-    t.cleanup_ms = since(t0)
-  }
-  return { rows: rows.length, kisCheck }
+  return rows.length
 }
 
 // Stock count of the latest KRX day before `dayIso` (null when there is none, e.g. the first load)
@@ -176,15 +149,12 @@ Deno.serve(monitored('krx-ingest', supabase, async (req, run: RunContext) => {
   }
 
   const results: Record<string, number | string> = {}
-  const kisCheck: Record<string, KisCheck> = {} // per day: KIS's last snapshot vs. KRX's official closes
   const timings: { ran_in: string | null; days: Record<string, DayTimings> } = { ran_in: HERE_REGION, days: {} }
   for (const t of targets) {
     const dt: DayTimings = { krx: [] }
     timings.days[t] = dt
     try {
-      const r = await ingestDay(t, dt)
-      results[t] = r.rows
-      if (r.kisCheck) kisCheck[t] = r.kisCheck
+      results[t] = await ingestDay(t, dt)
     } catch (e) {
       results[t] = `error: ${(e as Error).message}`
       if (String(e).includes('429')) break
@@ -194,5 +164,5 @@ Deno.serve(monitored('krx-ingest', supabase, async (req, run: RunContext) => {
   // Non-2xx when any day failed, so the failure shows up in the function logs and net._http_response
   // instead of hiding behind a 200 (a 401 from an expired KRX key went unnoticed for two weeks this way).
   const failed = Object.values(results).some((r) => typeof r === 'string')
-  return Response.json({ targets, results, kis_check: kisCheck, timings }, { status: failed ? 500 : 200 })
+  return Response.json({ targets, results, timings }, { status: failed ? 500 : 200 })
 }))

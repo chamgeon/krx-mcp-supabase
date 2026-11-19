@@ -672,6 +672,33 @@ What was done and why. Oldest first; new entries go at the bottom.
 - To update one: change its version in the imports, run a check with `--frozen=false` to rewrite `deno.lock`, run the
   tests, commit both.
 
+## 2026-11-19 — 수능 day: auction prices, after-market, KIS and KRX kept apart
+- **Found:** kis-ingest failed from 09:30 to 10:00 ("refused snapshot: open/close outside low..high in 94 of 2771
+  rows", then 248, 315, 193), fine before and after. 11-19 was 수능 day, when KRX opens at 10:00: 09:30–10:00 was the
+  pre-open auction, and KIS reports the day as today then, with the expected price (예상체결가) as the current price
+  and high/low still empty. The check refused the snapshots as it should; the previous one stayed. The 09:05–09:25
+  runs passed because nothing had traded yet (the range check only looks at traded rows), so they stored a flat,
+  zero-volume "today". The same happens on the year's first trading day (also a 10:00 open).
+- **Found:** the "KIS vs KRX" report line (2,080 of 2,770 closes differ on 11-17, 2,119 on 11-18) compared KIS's last
+  snapshot, taken during the after-market, with KRX's 종가. Since 2026-09-14 KRX runs a continuous after-market from
+  16:00 to 20:00 (replacing 시간외 단일가), so the two are expected to differ: not a data problem.
+- **Decided:** KRX data goes only to `daily_prices`, KIS data only to `live_prices`, and `live_prices.close` is the
+  latest price, after-market and expected prices included (no new columns). The `prices` view already shows KRX's
+  rows for a day once it has them, and KIS's while KRX is late, so a late KRX keeps KIS's closes as provisional bars.
+  **Why:** users want the latest price, including after hours; the official close is KRX's.
+- **Done:** kis-ingest reads KIS's `hour_cls_code` (0 예상체결 없음, B 정규장전, A 정규장후, C 장중 예상체결). A run where
+  more than half the stocks are at `B` is skipped (`skipped: pre-open auction`): pre-market data isn't kept. `A` and
+  `C` rows (after the close, VI) are stored and left out of the low..high check. A refused snapshot's message now
+  names 3 sample rows (`code o h l c`), so an alert can be diagnosed from the message.
+- **Done:** removed the KIS vs KRX comparison (krx-ingest's `kis_check`, `compareKisKrx`, the report line) and
+  krx-ingest's delete of the day's `live_prices` rows. pipeline-report deletes `live_prices` days older than 10 days
+  instead (after the 18:00 report). **Why:** after-hours prices are supposed to differ from the 종가; keeping KIS's
+  days a while covers a KRX outage of a week.
+- **Done:** `kis-ingest-after-hours` runs at 17:05, 18:05, 19:05 and 20:05 KST (`5 8-11 * * 1-5`; was 16:00 and 18:00),
+  so the day ends on the after-market's last price. Applied with `cron.alter_job`; `sql/cron.example.sql` updated.
+- Deployed kis-ingest, krx-ingest and pipeline-report around 12:09 KST. Not seen yet: a real pre-open (`B`) response
+  and an after-market (`A`) one; the 11-16 fixture only has `C` (3 preferred shares in VI) and `0`.
+
 ## Open
 - After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,
   shorten the quote's backoff (one request needs little of the per-second budget), pace `kis-ingest`'s burst, or use
@@ -679,16 +706,21 @@ What was done and why. Oldest first; new entries go at the bottom.
 - `get_stock_history` is over budget (requirements SIZE-1, SIZE-2, PERF-1): `days=250` returns up to 68 KB (limit
   64 KB, p95 target 20 KB), and the production p95 is 1.5 s (target 1 s, n=3). Options: lower the `days` max, drop
   columns for long ranges, or truncate with a note.
-- krx-ingest runtime (ING-1): max 126 s, p95 112 s, close to the free plan's 150 s Edge Function limit (check the
-  current limit in the Supabase docs). Find where the time goes, or split the batch.
-- `get_telegram_feed` with a short window (PERF-5, PERF-6): the 1h/30-post case has a warm tool p95 of 453 ms and an
-  end-to-end p95 of 1.7 s, worse than the 20h/50-post case. Probably the query plan for a small `since`.
+- `get_telegram_feed` with a short window (PERF-5, PERF-6): the 1h/30-post case had a warm tool p95 of 453 ms and an
+  end-to-end p95 of 1.7 s (11-17, before the `telegram_feed` function). Re-measure with a warm `deno task bench`.
 - `tool_calls` has no retention (CAP-4): add a cleanup next to `pipeline-report`'s 90-day delete of `ingest_runs`.
-- The KIS vs KRX check has no threshold (CORR-1): the report lists mismatches but doesn't flag more than 0.5%.
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
   next to the database, every minute) vs. moving the project to us-east-1. Then `screen_stocks`' cold SQL (1.3–1.9 s
   against ~0.25 s warm): `explain (analyze, buffers)` right after an idle period, to see if it's reading from disk.
-- After deploying kis-ingest's pool and moving its cron jobs to Seoul: check `summary->'timings'` (`ran_in` should be
-  `ap-northeast-2`; `kis_wall_ms`, `kis_ms / kis_calls` per call, `rate_limited`) against 11-18's 72–103 s.
-- krx-ingest after moving to Seoul: tomorrow's loading run's `summary->'timings'` (`ran_in`, per-call `ms`/`kb`,
-  `upsert_ms`) against 11-18's 126 s; then update ING-1.
+- krx-ingest (ING-1: 126 s on 11-18, 24 s from the limit): tomorrow's loading run (07:00–08:30) is the first in
+  Seoul with parallel markets; check `summary->'timings'` (`ran_in`, per-call `ms`/`kb`, `upsert_ms`), then update
+  ING-1.
+- Load benchmark (`bench:load`, not built): latency and errors vs. concurrency (1 → 5 → 10 → 25 → 50) to find the
+  knee and the first bottleneck (Postgres connections or compute, PostgREST, Edge workers, the forward hop), using
+  the per-step `timings`. Database-backed read-only tools only, outside the session (no KIS or t.me calls), via the
+  operator key (unlogged); short runs, within free-plan fair use. Framed as knowing the limits, not as needing scale.
+- Tonight (11-19), the first after-market runs: check that the 17:05–20:05 runs pass with `A` rows, and that `change`
+  is measured from the previous close (`close - change` = the previous day's `daily_prices.close` for traded rows).
+  If KIS measures it from today's 종가, `fluc_rt` in screens is wrong after 16:00. Also check tonight's report for the
+  `live_prices` cleanup.
+- CORR-1 in requirements.md still describes the KIS vs KRX check, which is removed: rewrite or drop it.

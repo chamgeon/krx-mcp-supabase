@@ -23,7 +23,11 @@ const NUMERIC = ['close', 'change', 'fluc_rt', 'open', 'high', 'low', 'volume', 
 const PRICE_LIMIT = 30.5 // KRX daily limit is ±30%; the extra 0.5 absorbs rounding
 
 /** Problems with a batch of rows, empty when it looks right. `minRows`: fewer rows than this is a problem. */
-export function rowProblems(rows: CheckedRow[], opts: { minRows: number; extraNumeric?: string[] }): string[] {
+/**
+ * `auction`: codes whose close is an expected price from a call auction (KIS 예상체결가: pre-open, VI), not a trade, so
+ * it can sit outside the day's traded range; they're left out of the open/close range check.
+ */
+export function rowProblems(rows: CheckedRow[], opts: { minRows: number; extraNumeric?: string[]; auction?: Set<string> }): string[] {
   const problems: string[] = []
   const n = rows.length
   if (n < opts.minRows) problems.push(`only ${n} rows (expected at least ${opts.minRows})`)
@@ -55,12 +59,17 @@ export function rowProblems(rows: CheckedRow[], opts: { minRows: number; extraNu
   if (tooMany(nonPositive)) problems.push(`종가 <= 0 in ${pct(nonPositive)}`)
 
   // No-trade rows (거래대금 0) carry the last close with open/high/low = 0, so only traded rows have a real range
-  const traded = rows.filter((r) => (r.trdval ?? 0) > 0 && r.high != null && r.low != null && r.close != null)
-  const outOfRange = traded.filter((r) => r.low! > r.close! || r.close! > r.high! || (r.open != null && r.open > 0 && (r.open < r.low! || r.open > r.high!))).length
-  if (tooMany(outOfRange)) problems.push(`open/close outside low..high in ${pct(outOfRange)}`)
+  const traded = rows.filter((r) => (r.trdval ?? 0) > 0 && r.high != null && r.low != null && r.close != null && !opts.auction?.has(r.isu_cd))
+  const outOfRange = traded.filter((r) => r.low! > r.close! || r.close! > r.high! || (r.open != null && r.open > 0 && (r.open < r.low! || r.open > r.high!)))
+  if (tooMany(outOfRange.length)) {
+    problems.push(`open/close outside low..high in ${pct(outOfRange.length)} (e.g. ${outOfRange.slice(0, 3).map(sample).join(', ')})`)
+  }
 
   const beyondLimit = rows.filter((r) => r.fluc_rt != null && Math.abs(r.fluc_rt) > PRICE_LIMIT).length
   if (tooMany(beyondLimit)) problems.push(`등락률 beyond ±30% in ${pct(beyondLimit)}`)
 
   return problems
 }
+
+// One row's numbers, short enough for an alert: 005930 o206500 h208000 l197600 c199000
+const sample = (r: CheckedRow) => `${r.isu_cd} o${r.open} h${r.high} l${r.low} c${r.close}`

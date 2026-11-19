@@ -6,13 +6,16 @@
 --   kis-ingest  09:05–15:20 KST, every 5 min                       Mon–Fri
 --               intraday snapshot. The cron fires 09:00–15:55 KST and the time check inside skips runs
 --               outside 09:05–15:20 (the opening auction and the 15:20–15:30 closing auction).
---   kis-ingest  15:40, 16:00, 18:00 KST  (06:40, 07:00, 09:00 UTC)  Mon–Fri
---               same-day provisional snapshot from KIS: 10 min after the 15:30 close, then again after
---               시간외 종가 (15:40–16:00) and 시간외 단일가 (16:00–18:00); each run overwrites the day,
---               and holidays are skipped.
+--   kis-ingest  15:40 KST               (06:40 UTC)              Mon–Fri
+--               the day's 종가, 10 min after the 15:30 close (시간외 종가 trades at the close).
+--   kis-ingest  17:05, 18:05, 19:05, 20:05 KST  (08:05–11:05 UTC)  Mon–Fri
+--               the 16:00–20:00 after-market (continuous trading since 2026-09-14, replacing 시간외 단일가):
+--               the after-market price becomes the live close; 20:05 takes its last price. Each run overwrites
+--               the day, and holidays are skipped.
 --   krx-ingest  07:00–08:30 KST          (22:00–23:30 UTC)        daily, every 30 min
---               KRX official data, published the next morning; replaces the KIS rows. Also fetches any
---               weekday from the last 7 days that still has no KRX data.
+--               KRX official data, published the next morning, into daily_prices; the prices view shows it in
+--               place of the day's KIS rows. Also fetches any weekday from the last 7 days that still has no
+--               KRX data.
 --   telegram-ingest  every 5 min, daily
 --               new posts from every collected public Telegram channel (one request per channel).
 --   pipeline-report  18:00 KST          (09:00 UTC)              daily
@@ -54,7 +57,7 @@ select cron.schedule(
 
 select cron.schedule(
   'kis-ingest-after-hours',
-  '0 7,9 * * 1-5',
+  '5 8-11 * * 1-5',
   $$
   select net.http_post(
     url := 'https://<PROJECT_REF>.supabase.co/functions/v1/kis-ingest',

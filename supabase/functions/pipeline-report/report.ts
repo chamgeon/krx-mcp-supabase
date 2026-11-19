@@ -22,7 +22,6 @@ export type ReportInput = {
   channelErrors: { username: string; last_error: string | null }[] // active channels currently failing
 }
 
-type KisCheckSummary = { compared: number; close_mismatch: number; examples: string[] }
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const n = (x: number) => x.toLocaleString('en-US')
@@ -80,19 +79,6 @@ export function buildReport({ end, runs, pendingKrxDays, krxLatest, channelError
       `✅ KRX official: latest ${krxLatest ? `${krxLatest.bas_dd.slice(5)} (${n(krxLatest.row_count)} stocks)` : '—'}` +
         (loaded.length ? `, loaded ${loaded.map((d) => `${d.slice(4, 6)}-${d.slice(6)}`).join(', ')}` : ''),
     )
-  }
-
-  // KIS vs. KRX: krx-ingest compares KIS's last snapshot of a day with KRX's official closes before replacing it
-  for (const r of krxRuns) {
-    for (const [d, c] of Object.entries(r.summary?.kis_check ?? {}) as [string, KisCheckSummary][]) {
-      const day = `${d.slice(4, 6)}-${d.slice(6)}`
-      lines.push(
-        c.close_mismatch
-          ? `⚠️ KIS vs KRX ${day}: ${n(c.close_mismatch)} of ${n(c.compared)} ` +
-            `${c.close_mismatch === 1 ? 'close differs' : 'closes differ'} (${c.examples.slice(0, 3).join(', ')})`
-          : `✅ KIS vs KRX ${day}: all ${n(c.compared)} closes match`,
-      )
-    }
   }
 
   // Telegram

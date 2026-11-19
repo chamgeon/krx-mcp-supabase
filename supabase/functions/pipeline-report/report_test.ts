@@ -79,14 +79,3 @@ Deno.test('jobs that never ran are flagged', () => {
   assertStringIncludes(text, "❌ KRX: krx-ingest didn't run (07:00–08:30)")
   assertStringIncludes(text, "❌ Telegram: telegram-ingest didn't run")
 })
-
-Deno.test('KIS vs KRX: the comparison made when KRX replaced a day', () => {
-  const withCheck = (check: object): Run => ({ ...krx, summary: { ...krx.summary, kis_check: { '20261116': check } } })
-  const match = buildReport({ ...healthy, runs: [withCheck({ compared: 2771, close_mismatch: 0, examples: [] }), kis('15:40'), tg(1)] })
-  assertStringIncludes(match, '✅ KIS vs KRX 11-16: all 2,771 closes match')
-  const off = buildReport({
-    ...healthy,
-    runs: [withCheck({ compared: 2771, close_mismatch: 2, examples: ['005930 70000→70100', '000660 1→2'] }), tg(1)],
-  })
-  assertStringIncludes(off, '⚠️ KIS vs KRX 11-16: 2 of 2,771 closes differ (005930 70000→70100, 000660 1→2)')
-})

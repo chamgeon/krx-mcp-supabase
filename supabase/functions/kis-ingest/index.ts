@@ -27,7 +27,7 @@
 import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { kisGet, kisToken } from '../_shared/kis.ts'
-import { kisSnapshotProblems, parseKisRows, type Prev } from './parse.ts'
+import { auctionCodes, kisSnapshotProblems, parseKisRows, type Prev } from './parse.ts'
 import { monitored, type RunContext } from '../_shared/ops.ts'
 import { pacedPool } from './pool.ts'
 
@@ -35,6 +35,7 @@ const MULTI_MAX = 30 // intstock-multprice: up to 30 stocks per call
 const PROGRESS_EVERY = 25 // KIS calls between progress saves (~4 per run)
 const KIS_CONCURRENCY = 5
 const KIS_PER_SECOND = 8 // 10/s drew 4–15 rate-limit answers per run (11-18), each a 1 s retry
+const PRE_OPEN_SKIP = 0.5 // more than half the market in the pre-open auction ('B') = not open yet
 const HERE_REGION = Deno.env.get('SB_REGION') || null // set by Supabase; unset locally
 
 // Where a run's time goes (ms), for the answer and the running row's progress
@@ -123,9 +124,10 @@ async function snapshot(
   prev: Prev[],
   t: Timings,
   run: RunContext,
-): Promise<number> {
+): Promise<{ rows: number } | { skipped: string }> {
   const byCode = new Map(prev.map((p) => [p.isu_cd, p]))
   const rows: ReturnType<typeof parseKisRows> = []
+  const auction = new Map<string, string>() // code → hour_cls_code, for expected prices (./parse.ts)
   const onRateLimited = async (wait: Promise<void>) => {
     const w0 = performance.now()
     t.rate_limited++
@@ -154,13 +156,22 @@ async function snapshot(
     t.kis_wall_ms = Math.round(performance.now() - w0)
     // not awaited: a progress save must not hold up the next call (it's one small update, and the last one wins)
     if (t.kis_calls % PROGRESS_EVERY === 0) run.progress({ ...t })
+    for (const [code, hour] of auctionCodes(body.output)) auction.set(code, hour)
     return parseKisRows(body.output, byCode, todayIso, asOf)
   })
   for (const r of parsed) rows.push(...r)
   t.kis_wall_ms = Math.round(performance.now() - w0)
+  // Pre-market data isn't kept: during the pre-open auction (08:30–09:00, or 09:30–10:00 on 수능 day and the year's
+  // first trading day) KIS already reports today, at expected prices with no trades. Keep the previous snapshot.
+  // Expected prices later in the day (VI, the closing auction) are kept, as live prices, outside the range check.
+  const preOpen = [...auction.values()].filter((h) => h === 'B').length
+  if (preOpen > rows.length * PRE_OPEN_SKIP) {
+    t.phase = 'done'
+    return { skipped: `pre-open auction (${preOpen} of ${rows.length} stocks)` }
+  }
   // Refuse a snapshot that looks wrong (renamed fields, most stocks missing): the previous snapshot stays, with its
   // older as_of, and the run fails with the reason
-  const problems = kisSnapshotProblems(rows, prev.length)
+  const problems = kisSnapshotProblems(rows, prev.length, auction)
   if (problems.length) throw new Error(`refused snapshot: ${problems.join('; ')}`)
   t.phase = 'upsert'
   await run.progress(t)
@@ -173,7 +184,7 @@ async function snapshot(
     }
   })())
   t.phase = 'done'
-  return rows.length
+  return { rows: rows.length }
 }
 
 // Every run is recorded in ingest_runs, and a failure alerts the operator on Telegram (../_shared/ops.ts)
@@ -204,8 +215,8 @@ Deno.serve(monitored('kis-ingest', supabase, async (req, run) => {
     const stocks = await timed(t, 'stock_list_ms', stocksOf(prev))
     t.stocks = stocks.length
     await run.progress(t)
-    const count = await snapshot(token, todayIso, asOf, stocks, t, run)
-    return Response.json({ date: today, as_of: asOf, stock_list_from: prev, rows: count, timings: t })
+    const result = await snapshot(token, todayIso, asOf, stocks, t, run)
+    return Response.json({ date: today, as_of: asOf, stock_list_from: prev, ...result, timings: t })
   } catch (e) {
     return Response.json({ date: today, error: (e as Error).message, timings: t }, { status: 500 })
   }

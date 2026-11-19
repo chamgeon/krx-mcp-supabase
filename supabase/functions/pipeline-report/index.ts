@@ -11,6 +11,9 @@ import { sendTelegram } from '../_shared/ops.ts'
 import { buildReport, reportWindowEnd, type Run } from './report.ts'
 
 const KEEP_RUNS_DAYS = 90
+// kis-ingest's days in live_prices: the prices view shows KRX's rows for a day once it has them, so older KIS days only
+// matter while KRX is late. Kept 10 days, so a KRX outage of a week still has KIS's closes to fall back on.
+const KEEP_LIVE_DAYS = 10
 
 const INGEST_SECRET = Deno.env.get('INGEST_SECRET')!
 const supabase = createClient(
@@ -32,8 +35,8 @@ Deno.serve(async (req) => {
       supabase.from('ingest_runs').select('job, started_at, ok, summary, error')
         .gte('started_at', start.toISOString()).lt('started_at', end.toISOString())
         .order('started_at').limit(5000),
-      // krx-ingest deletes a day's KIS rows once KRX's data is in, so a provisional day before today is one KRX
-      // hasn't loaded. Holidays never get KIS rows, so they can't show up here.
+      // available_dates lists a KIS day as provisional only while KRX doesn't have it, so a provisional day before today
+      // is one KRX hasn't loaded. Holidays never get KIS rows, so they can't show up here.
       supabase.from('available_dates').select('bas_dd').eq('final', false).lt('bas_dd', todayIso).order('bas_dd'),
       supabase.from('trading_days').select('bas_dd, row_count').order('bas_dd', { ascending: false }).limit(1),
       supabase.from('telegram_channels').select('username, last_error').eq('active', true).gt('poll_errors', 0),
@@ -52,6 +55,9 @@ Deno.serve(async (req) => {
     const { error } = await supabase.from('ingest_runs').delete()
       .lt('started_at', new Date(Date.now() - KEEP_RUNS_DAYS * 86400_000).toISOString())
     if (error) console.error('ingest_runs cleanup failed:', error.message)
+    const live = await supabase.from('live_prices').delete()
+      .lt('bas_dd', new Date(end.getTime() + 9 * 3600_000 - KEEP_LIVE_DAYS * 86400_000).toISOString().slice(0, 10))
+    if (live.error) console.error('live_prices cleanup failed:', live.error.message)
 
     return Response.json({ sent, text }, { status: sent ? 200 : 500 })
   } catch (e) {

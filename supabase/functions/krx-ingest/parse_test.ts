@@ -4,7 +4,7 @@
 // Run from the repo root: deno task test
 
 import { assert, assertEquals } from 'jsr:@std/assert@1.0.19'
-import { compareKisKrx, krxDayProblems, krxItems, parseKrxRows, type PriceRow } from './parse.ts'
+import { krxDayProblems, krxItems, parseKrxRows, type PriceRow } from './parse.ts'
 
 const DAY = '20261113'
 // The fixtures are gitignored (third-party data, public repo): fetch them with `deno task fixtures`. Without them these
@@ -138,29 +138,4 @@ fixtureTest('validation: a day with a third of the stocks missing is refused', (
 
 Deno.test('validation: holiday (both markets empty) is fine', () => {
   assertEquals(krxDayProblems([], [], 2770), [])
-})
-
-// ---- KIS's last snapshot vs. KRX's official day ----
-
-const krxRow = (isu_cd: string, close: number): PriceRow => ({
-  bas_dd: '2026-11-16', isu_cd, isu_nm: isu_cd, market: 'KOSPI', sect_tp_nm: null, close, change: 0, fluc_rt: 0,
-  open: close, high: close, low: close, volume: 1, trdval: close, mktcap: null, list_shrs: null, source: 'krx', as_of: null,
-})
-
-Deno.test('compareKisKrx: closes that match, differ, and stocks on one side only', () => {
-  const krx = [krxRow('000001', 1000), krxRow('000002', 2000), krxRow('000003', 3000), krxRow('NEW001', 500)]
-  const kis = [{ isu_cd: '000001', close: 1000 }, { isu_cd: '000002', close: 2010 }, { isu_cd: '000003', close: 3000 },
-    { isu_cd: 'GONE01', close: 700 }]
-  assertEquals(compareKisKrx(kis, krx), {
-    compared: 3, close_mismatch: 1, only_kis: 1, only_krx: 1, examples: ['000002 2010→2000'],
-  })
-})
-
-Deno.test('compareKisKrx: at most 5 examples; numeric strings compare as numbers', () => {
-  const krx = Array.from({ length: 8 }, (_, i) => krxRow(`00000${i}`, 100))
-  const kis = krx.map((r) => ({ isu_cd: r.isu_cd, close: 101 }))
-  const c = compareKisKrx(kis, krx)
-  assertEquals([c.compared, c.close_mismatch, c.examples.length], [8, 8, 5])
-  // PostgREST returns bigint columns as numbers, but don't trust it
-  assertEquals(compareKisKrx([{ isu_cd: '000000', close: '100' as unknown as number }], [krxRow('000000', 100)]).close_mismatch, 0)
 })

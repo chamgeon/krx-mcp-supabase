@@ -50,7 +50,17 @@ Deno.test('a handful of odd rows is tolerated, many are not', () => {
 
 Deno.test('swapped high/low is refused', () => {
   const r = rows(1000).map((x) => ({ ...x, high: x.low, low: x.high }))
-  assertEquals(rowProblems(r, opts), ['open/close outside low..high in 980 of 1000 rows']) // the 20 no-trade rows have no range
+  assertEquals(rowProblems(r, opts), [
+    'open/close outside low..high in 980 of 1000 rows (e.g. 100001 o995 h990 l1010 c1000, 100002 o995 h990 l1010 c1000, 100003 o995 h990 l1010 c1000)',
+  ]) // the 20 no-trade rows have no range
+})
+
+Deno.test('call-auction rows (expected prices) are left out of the range check', () => {
+  // KIS during an auction: the close is the expected price, high/low not there yet (11-19, 수능 day's late open)
+  const r = rows(1000).map((x, i) => (i < 300 ? { ...x, open: 0, high: 0, low: 0, close: 1020 } : x))
+  assertEquals(rowProblems(r, opts).length, 1)
+  const auction = new Set(r.slice(0, 300).map((x) => x.isu_cd))
+  assertEquals(rowProblems(r, { ...opts, auction }), [])
 })
 
 Deno.test('duplicate codes, bad codes, missing names', () => {
