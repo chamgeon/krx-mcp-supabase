@@ -63,11 +63,12 @@ column points at the test that proves it, or is empty where none exists yet.
 
 | ID | P | Requirement | Acceptance test |
 |---|---|---|---|
-| FR-ING-1 | M | KIS provisional rows for a day are replaced by KRX official rows once KRX publishes that day. | db_test: "prices view hides live rows for days KRX already published" |
-| FR-ING-2 | M | An ingest batch that fails sanity checks (row count, 6-char 종목코드, no duplicates, OHLC order, 등락률 within ±30.5%; > max(5, 1%) bad rows = failure) is refused, existing data is kept, and the run fails visibly. | `_shared/validate_test.ts` |
+| FR-ING-1 | M | KRX data goes only to `daily_prices`, KIS data only to `live_prices`. Readers get KRX's rows for a day once KRX publishes it, and KIS's (provisional) until then, so a late KRX still leaves a row for every trading day. | db_test: "prices view hides live rows for days KRX already published" |
+| FR-ING-2 | M | An ingest batch that fails sanity checks (row count, 6-char 종목코드, no duplicates, OHLC order, 등락률 within ±30.5%; > max(5, 1%) bad rows = failure) is refused, existing data is kept, and the run fails visibly. KIS rows at an expected or after-close price (`hour_cls_code` A or C) are kept but left out of the OHLC order check. | `_shared/validate_test.ts`, `kis-ingest/parse_test.ts` |
+| FR-ING-8 | M | Pre-market data isn't kept: a KIS snapshot taken during the pre-open auction (more than half the stocks at `hour_cls_code` B) is skipped, not stored or alerted, and the previous snapshot stays. | `kis-ingest/parse_test.ts` (`auctionCodes`); not yet seen on a real pre-open response |
 | FR-ING-3 | M | Every ingest run writes one `ingest_runs` row when it starts (running, with progress) and completes it at the end, whether it succeeds or fails. | db_test: "monitored: a run is recorded with its answer", "the row is written when the run starts" |
 | FR-ING-4 | M | A failed run sends a Telegram alert immediately, at most one per job per hour. | db_test: "monitored: a failure alerts once per hour" |
-| FR-ING-5 | M | A daily report at 18:00 KST summarizes ingest runs and the KIS vs KRX close-price comparison. | `pipeline-report/report_test.ts` |
+| FR-ING-5 | M | A daily report at 18:00 KST summarizes ingest runs. | `pipeline-report/report_test.ts` |
 | FR-ING-6 | M | A run stopped at the Edge Function time limit (so it never completes its row) is marked failed and alerted within 5 minutes, with the progress it had saved. | db_test: "a run stopped at the time limit is marked failed and alerted" |
 | FR-ING-7 | S | Errors in alerts and `last_error` are readable: an HTML error page from a gateway is reduced to its title. | `_shared/errors_test.ts`; db_test: "an HTML error page is recorded and alerted as its title" |
 
@@ -157,8 +158,8 @@ Responses go into an LLM's context window, so size is a cost and a quality issue
 
 | ID | P | Requirement | Baseline (all time) | Status |
 |---|---|---|---|---|
-| SIZE-1 | S | Response p95 ≤ 20 KB per tool | max p95: feed 16 KB, movers 14 KB, history **59 KB** | ⚠️ history |
-| SIZE-2 | M | No response > 64 KB; larger results are truncated and say so | history max **68 KB** (`days` up to 250) | ⚠️ history |
+| SIZE-1 | S | Response p95 ≤ 20 KB per tool | max p95: feed 16 KB, movers 14 KB; history since 11-19: 20 days ~4 KB, the 120-day maximum 22 KB | ❔ history: p95 over real calls since 11-19 |
+| SIZE-2 | M | No response > 64 KB; larger results are truncated and say so | history max 22 KB since 11-19 (`days` up to 120; was 66 KB at 250) | ✅ |
 
 ### 2.5 Reliability
 
@@ -175,7 +176,8 @@ Responses go into an LLM's context window, so size is a cost and a quality issue
 | ID | P | Requirement | Baseline | Status |
 |---|---|---|---|---|
 | FRESH-1 | M | During the session (09:00–15:30 trading days), provisional data is ≤ 10 min old | KIS cron every 5 min 09:00–15:55; run p95 45 s | ✅ |
-| FRESH-2 | M | Closing provisional data exists by 16:00 KST | KIS close run 15:40, after-hours runs 16:00 and 18:00 | ✅ |
+| FRESH-2 | M | Closing provisional data exists by 16:00 KST | KIS close run 15:40 | ✅ |
+| FRESH-6 | S | The live price reflects the 16:00–20:00 after-market, ending on its last price by 20:10 KST | after-market runs 17:05, 18:05, 19:05, 20:05 (from 11-19) | ❔ first runs 11-19 evening |
 | FRESH-3 | M | KRX official data for trading day D is loaded by 09:00 KST on D+1 | KRX cron 07:00–08:30 every 30 min | ✅ |
 | FRESH-4 | S | Telegram posts are collected ≤ 10 min after posting | telegram cron every 5 min, run p95 7.4 s | ✅ |
 | FRESH-5 | M | A failed ingest is alerted within 5 min of the run finishing | alert sent by the run itself (FR-ING-4) | ✅ |
@@ -192,7 +194,7 @@ Responses go into an LLM's context window, so size is a cost and a quality issue
 
 | ID | P | Requirement | Baseline | Status |
 |---|---|---|---|---|
-| CORR-1 | M | KIS vs KRX close-price mismatches ≤ 0.5% of compared stocks per day (reported at 18:00) | in daily report | ❔ add threshold |
+| CORR-1 | M | KIS's `change`/`fluc_rt` are measured from the previous trading day's close at all hours, after-market included (`close − change` = the previous day's close for traded rows), so screens' 등락률 stay right after 16:00 | | ❔ check 11-19 evening |
 | CORR-2 | M | No two rows for the same (종목코드, date) | primary key | ✅ |
 | CORR-3 | M | Every `screen_stocks` filter and every `get_daily_movers` rule has a fixture-based test | db_test covers each filter; movers sheet3 untested | ⚠️ |
 | CORR-4 | M | All numbers come from SQL/TypeScript over stored data; no LLM on the server | by design | ✅ |
@@ -204,7 +206,7 @@ Responses go into an LLM's context window, so size is a cost and a quality issue
 | CAP-1 | M | Database ≤ 400 MB (80% of the 500 MB free limit); alert when exceeded | 283 MB (57%) | ✅ |
 | CAP-2 | M | KRX API calls ≤ 10,000 per day, including backfill | | ✅ |
 | CAP-3 | M | KIS calls stay under the per-second limit; on a limit error, back off and retry | `_shared/kis.ts` | ✅ |
-| CAP-4 | S | `ingest_runs` keeps 90 days; `tool_calls` has a retention policy | ingest 90 d; tool_calls unbounded | ⚠️ tool_calls |
+| CAP-4 | S | `ingest_runs` keeps 90 days, `live_prices` 10 days; `tool_calls` has a retention policy | ingest 90 d, live 10 d (pipeline-report); tool_calls unbounded | ⚠️ tool_calls |
 | CAP-5 | S | Monthly Edge Function invocations ≤ 80% of the free quota | | ❔ |
 | CAP-6 | M | Running cost stays $0/month | | ✅ |
 

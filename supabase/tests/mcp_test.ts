@@ -224,6 +224,9 @@ test('get_stock_history', async () => {
   assertEquals(r.종목명, '돌파전자')
   assertEquals(r.rows.map((x: Json) => x.일자), [LIVE_DAY, DAY, '2026-11-12'])
   assertEquals(r.rows[1].종가, 11000)
+  // the stock's fields are given once, not per row
+  assertEquals(r.rows[0].종목코드, undefined)
+  assertEquals(r.rows[0].종목명, undefined)
   assert(r.charts.네이버_종목페이지)
 })
 
@@ -318,6 +321,8 @@ test('check_available_dates: range, a final day, a missing day', async () => {
 test('invalid arguments are rejected by the schema, not crashed on', async () => {
   const r = await (await keyClient()).callTool({ name: 'get_stock_history', arguments: { code: '900001', days: 0 } })
   assert(r.isError, 'days: 0 should fail validation')
+  const long = await (await keyClient()).callTool({ name: 'get_stock_history', arguments: { code: '900001', days: 121 } })
+  assert(long.isError, 'days: 121 should fail validation (max 120)')
 })
 
 // ---- telegram tools -------------------------------------------------------------------------------

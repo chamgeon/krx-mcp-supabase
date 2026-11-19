@@ -699,19 +699,33 @@ What was done and why. Oldest first; new entries go at the bottom.
 - Deployed kis-ingest, krx-ingest and pipeline-report around 12:09 KST. Not seen yet: a real pre-open (`B`) response
   and an after-market (`A`) one; the 11-16 fixture only has `C` (3 preferred shares in VI) and `0`.
 
+## 2026-11-19 — get_stock_history: smaller rows, at most 120 days
+- **Done:** the stock's fields (종목코드, 종목명, 시장, 소속부) are given once at the top, and each row is 일자 plus the
+  day's numbers; `days` max 250 → 120 (~6 months, `screen_stocks`' longest window). A 120-day answer is ~30 KB
+  (built from production rows for 005930 and 247540). **Why:** `days=250` returned 66 KB, over the 64 KB limit
+  (SIZE-2); a year of daily rows is mostly noise in the model's context, and the Naver weekly/monthly chart links
+  cover the long view. Real calls so far asked for 20, 20, 3 and one 250. Deployed; a production `days: 120` call
+  (253450) returned 22.4 KB.
+- **Found:** history's latency isn't the query: in Postgres it's ~10 ms (`pg_stat_statements`: 614 calls) and uses
+  `daily_prices_code_date_idx`. The `history` step took ~500 ms for 3 calls after an hour idle (12:27) and 45–90 ms
+  for 3 calls 50 s later; PERF-1's 1.5 s (n=3) was all after-idle calls. Moved to the cold-calls item below.
+
 ## Open
 - After a day of in-session `analyze_stock` calls: check `kis_rate_limited` steps. If slow quotes are rate-limit waits,
   shorten the quote's backoff (one request needs little of the per-second budget), pace `kis-ingest`'s burst, or use
   a separate KIS app key for quotes.
-- `get_stock_history` is over budget (requirements SIZE-1, SIZE-2, PERF-1): `days=250` returns up to 68 KB (limit
-  64 KB, p95 target 20 KB), and the production p95 is 1.5 s (target 1 s, n=3). Options: lower the `days` max, drop
-  columns for long ranges, or truncate with a note.
 - `get_telegram_feed` with a short window (PERF-5, PERF-6): the 1h/30-post case had a warm tool p95 of 453 ms and an
   end-to-end p95 of 1.7 s (11-17, before the `telegram_feed` function). Re-measure with a warm `deno task bench`.
 - `tool_calls` has no retention (CAP-4): add a cleanup next to `pipeline-report`'s 90-day delete of `ingest_runs`.
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
   next to the database, every minute) vs. moving the project to us-east-1. Then `screen_stocks`' cold SQL (1.3–1.9 s
   against ~0.25 s warm): `explain (analyze, buffers)` right after an idle period, to see if it's reading from disk.
+  - Also a smaller warm-up with no worker boot: the first database call after an idle period costs ~400–500 ms
+    against 45–90 ms warm (11-19: `get_stock_history` 495–503 ms at 12:27 after an hour idle, 45–90 ms at 12:28;
+    the query is ~10 ms in Postgres). Across tools, the first call in a request is p50 141 / p90 549 ms against
+    p50 70 / p90 127 for later ones. History pays it on every after-idle call because it's its only step, so its
+    PERF-1 number (1.5 s, n=3) is this warm-up, not the tool. A keep-warm ping would cover both; re-measure PERF-1
+    separating warm from after-idle calls.
 - krx-ingest (ING-1: 126 s on 11-18, 24 s from the limit): tomorrow's loading run (07:00–08:30) is the first in
   Seoul with parallel markets; check `summary->'timings'` (`ran_in`, per-call `ms`/`kb`, `upsert_ms`), then update
   ING-1.
@@ -723,4 +737,3 @@ What was done and why. Oldest first; new entries go at the bottom.
   is measured from the previous close (`close - change` = the previous day's `daily_prices.close` for traded rows).
   If KIS measures it from today's 종가, `fluc_rt` in screens is wrong after 16:00. Also check tonight's report for the
   `live_prices` cleanup.
-- CORR-1 in requirements.md still describes the KIS vs KRX check, which is removed: rewrite or drop it.

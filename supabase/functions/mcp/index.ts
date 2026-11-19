@@ -359,7 +359,8 @@ const handler = createMcpHandler((ctx) => {
         'Useful context for explaining a move, e.g. whether it was a breakout after a long base or a multi-day run.',
       inputSchema: z.object({
         code: z.string().describe('6-digit 종목코드, e.g. 005930'),
-        days: z.number().int().min(1).max(250).default(20),
+        // 120 (~6 months, screen_stocks' longest window): 250 rows came to 66 KB, over the 64 KB limit (SIZE-2)
+        days: z.number().int().min(1).max(120).default(20),
       }),
       annotations: { readOnlyHint: true },
     },
@@ -372,10 +373,16 @@ const handler = createMcpHandler((ctx) => {
         .limit(days))
       if (error) throw new Error(error.message)
       const rows = (data ?? []) as Row[]
+      // The stock's fields once, from the latest row; each row is the date and the day's numbers
       return json({
         종목코드: code,
         종목명: rows[0]?.isu_nm ?? null,
-        rows: rows.map((r) => ({ 일자: r.bas_dd, ...present(r) })),
+        시장: rows[0]?.market ?? null,
+        소속부: rows[0]?.sect_tp_nm ?? null,
+        rows: rows.map((r) => {
+          const { 종목코드: _c, 종목명: _n, 시장: _m, 소속부: _s, ...day } = present(r)
+          return { 일자: r.bas_dd, ...day }
+        }),
         charts: charts(code),
       })
     },
