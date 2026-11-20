@@ -197,7 +197,7 @@ Responses go into an LLM's context window, so size is a cost and a quality issue
 
 | ID | P | Requirement | Baseline | Status |
 |---|---|---|---|---|
-| CORR-1 | M | KIS's `change`/`fluc_rt` are measured from the previous trading day's close at all hours, after-market included (`close − change` = the previous day's close for traded rows), so screens' 등락률 stay right after 16:00 | | ❔ check 11-19 evening |
+| CORR-1 | M | KIS's `change`/`fluc_rt` are measured from the previous trading day's close at all hours, after-market included (`close − change` = the previous day's close for traded rows), so screens' 등락률 stay right after 16:00 | 11-19 18:05: 2,659 of 2,661 traded stocks (2 SPACs with a rounded base price) | ✅ |
 | CORR-2 | M | No two rows for the same (종목코드, date) | primary key | ✅ |
 | CORR-3 | M | Every `screen_stocks` filter and every `get_daily_movers` rule has a fixture-based test | db_test covers each filter; movers sheet3 untested | ⚠️ |
 | CORR-4 | M | All numbers come from SQL/TypeScript over stored data; no LLM on the server | by design | ✅ |

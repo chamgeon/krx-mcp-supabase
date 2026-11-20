@@ -1,12 +1,12 @@
 # Working on this repo
 
-## Supabase CLI (v3): local by default
+## Commit
+- Commit should be always made by user.
 
-- **Migrations to production: `supabase db push --remote`.** Plain `supabase db push` applies them to the local stack
-  only. Deploy order: `supabase db push --remote` first, then `supabase functions deploy …`; a function deployed
-  before its migration fails on the missing columns (2026-11-19: telegram-ingest, "column … gated_at does not exist").
-- Queries on production: `supabase db query --remote --read-only "<sql>"`. A write needs `--remote --yes`, and only
-  with the user's go-ahead.
+## Supabase CLI (v3)
+
+- Migrations to production: `supabase db push --remote`. Plain `supabase db push` applies them to the local stack only.
+- Queries on production: `supabase db query --remote --read-only "<sql>"`. A write needs `--remote --yes`, and only with the user's go-ahead.
 - `supabase db reset` and `supabase functions serve` are local (tests).
 - In agent mode, `supabase functions deploy` needs `--yes` to confirm; deploy only when the user asked for it.
 

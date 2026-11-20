@@ -157,6 +157,17 @@ event applies only to posts inside its window (`active_from` to `active_to`); ad
 To gate the posts stored before the gate at once (instead of 40 per 5-minute run), call `telegram-ingest?gate=500`
 until its `gate.left` is 0.
 
+Telegram hides some channels' web previews from some countries (e.g. `t.me/s/stockbot` redirects from Mumbai, loads
+from Seoul). With the database in Mumbai, fetch t.me from Seoul: the telegram-ingest cron sends `x-region:
+ap-northeast-2` (`sql/cron.example.sql`), and `mcp` (which runs next to the database) fetches its pages through
+telegram-ingest's `?page=` relay there:
+
+```bash
+supabase secrets set TG_REGION=ap-northeast-2
+```
+
+Without it `mcp` fetches t.me from wherever it runs, and such channels can't be added there ("no public web preview").
+
 #### Telegram gate: useful SQL
 
 Run in the SQL editor, or `supabase db query --remote "<sql>"`. Re-gating is always `gated_at = null`: telegram-ingest

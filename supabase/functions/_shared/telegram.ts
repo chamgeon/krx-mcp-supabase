@@ -51,13 +51,59 @@ function parseViews(s: string | null | undefined): number | null {
   return Math.round(n)
 }
 
+// ---- Where pages are fetched from ----
+// Telegram hides some channels' previews from India: t.me/s/stockbot redirects from ap-south-1 (Mumbai) but loads from
+// Seoul, Tokyo and Singapore (log 2026-11-20). telegram-ingest runs in Seoul (its cron sends x-region) and fetches
+// directly. mcp runs next to the database in Mumbai, so it fetches through telegram-ingest's ?page relay in Seoul
+// (relayPages, set by mcp when TG_REGION is set).
+
+export type RawPage = { status: number; html: string }
+export type PageSource = (channel: string, before?: number) => Promise<RawPage>
+
+const previewUrl = (channel: string, before?: number) => `https://t.me/s/${channel}${before ? `?before=${before}` : ''}`
+
+/** Fetches a preview page from here. A redirect (no preview) comes back as its 3xx status, not followed. */
+export const directPage: PageSource = async (channel, before) => {
+  const res = await fetch(previewUrl(channel, before), {
+    headers: { 'User-Agent': UA, 'Accept-Language': 'ko,en;q=0.8' },
+    redirect: 'manual',
+  })
+  const html = await res.text()
+  return { status: res.status, html: res.ok ? html : '' }
+}
+
+/**
+ * Fetches pages through telegram-ingest's ?page relay in `region` (x-region). If the relay itself fails (not
+ * Telegram's answer: the relay's network, auth or a 5xx), the page is fetched from here instead, so a relay outage
+ * only brings back the region problem for the channels it affects.
+ */
+export function relayPages(supabaseUrl: string, secret: string, region: string, fallback: PageSource = directPage): PageSource {
+  return async (channel, before) => {
+    const url = `${supabaseUrl}/functions/v1/telegram-ingest?page=${channel}${before ? `&before=${before}` : ''}`
+    try {
+      const res = await fetch(url, { method: 'POST', headers: { 'x-ingest-secret': secret, 'x-region': region } })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const body = await res.json() as RawPage
+      if (typeof body?.status !== 'number' || typeof body.html !== 'string') throw new Error('unexpected answer')
+      return body
+    } catch (e) {
+      console.error(`telegram page relay (${region}) failed for ${channel}, fetching here:`, (e as Error).message)
+      return fallback(channel, before)
+    }
+  }
+}
+
+let pageSource: PageSource = directPage
+/** Sets where fetchPage gets pages from (mcp: relayPages). Default: directPage. */
+export function setPageSource(source: PageSource) {
+  pageSource = source
+}
+
 /** Fetches one preview page. Returns null when the channel has no public preview (missing, private, or turned off). */
 export async function fetchPage(channel: string, before?: number): Promise<TgPage | null> {
-  const url = `https://t.me/s/${channel}${before ? `?before=${before}` : ''}`
-  const res = await fetch(url, { headers: { 'User-Agent': UA, 'Accept-Language': 'ko,en;q=0.8' }, redirect: 'manual' })
-  if (res.status >= 300 && res.status < 400) return null // no preview: t.me/s/<name> redirects to t.me/<name>
-  if (!res.ok) throw new Error(`t.me/s/${channel}: HTTP ${res.status}`)
-  const html = await res.text()
+  const { status, html } = await pageSource(channel, before)
+  if (status >= 300 && status < 400) return null // no preview: t.me/s/<name> redirects to t.me/<name>
+  if (status < 200 || status >= 300) throw new Error(`t.me/s/${channel}: HTTP ${status}`)
   const page = parsePage(html, channel)
   const problems = pageProblems(html, page, channel)
   if (problems.length) throw new Error(`t.me/s/${channel}: ${problems.join('; ')}`)
@@ -93,11 +139,13 @@ export function parsePage(html: string, channel: string): TgPage {
     const [owner, id] = (el.getAttribute('data-post') ?? '').split('/')
     if (owner?.toLowerCase() !== channel || !/^\d+$/.test(id ?? '')) continue // e.g. a post embedded from elsewhere
     const bubble = el.querySelector('.tgme_widget_message_bubble')
-    // The post's own text is a direct child of the bubble; a quoted reply has its own nested text block.
-    const textEl = bubble
-      ? // deno-lint-ignore no-explicit-any
-      [...bubble.children].find((c: any) => c.classList.contains('tgme_widget_message_text'))
-      : null
+    // The post's own text is a direct child of the bubble; a quoted reply has its own nested text block. Posts the
+    // preview can't fully show (text_not_supported_wrap: custom emoji, some media) put it one level down, in
+    // media_supported_cont, next to a "Please open Telegram" notice (log 2026-11-20, @stockbot).
+    // deno-lint-ignore no-explicit-any
+    const child = (parent: any, cls: string) => parent ? [...parent.children].find((c: any) => c.classList.contains(cls)) : null
+    const textEl = child(bubble, 'tgme_widget_message_text') ??
+      child(child(bubble, 'media_supported_cont'), 'tgme_widget_message_text')
     let text = ''
     const links: string[] = []
     if (textEl) {

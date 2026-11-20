@@ -1,8 +1,10 @@
 // Unit tests for Telegram channel names, preview-page parsing and stock tagging. No network: the HTML is inline.
 // Run from the repo root: deno task test
 
-import { assertEquals } from 'jsr:@std/assert@1.0.19'
-import { channelName, pageProblems, parsePage } from './telegram.ts'
+import { assertEquals, assertRejects } from 'jsr:@std/assert@1.0.19'
+import {
+  channelName, directPage, fetchPage, pageProblems, type PageSource, parsePage, relayPages, setPageSource,
+} from './telegram.ts'
 
 Deno.test('channelName normalizes the ways people paste a channel', () => {
   for (const s of ['@StockNews', 'stocknews', 't.me/stocknews', 'https://t.me/s/stocknews/123', 'https://www.t.me/stocknews?x=1']) {
@@ -70,6 +72,40 @@ Deno.test('parsePage: document title becomes text, M views', () => {
   assertEquals(p.forwarded_from, null)
 })
 
+// A post the preview can't fully show (custom emoji): the text is one level down, in media_supported_cont, next to a
+// "Please open Telegram" notice. Trimmed from t.me/s/stockbot (2026-11-20).
+const NOT_SUPPORTED = `<html><body>
+<div class="tgme_widget_message text_not_supported_wrap js-widget_message" data-post="stockbot/9139">
+  <div class="tgme_widget_message_bubble">
+    <div class="tgme_widget_message_author"><a class="tgme_widget_message_owner_name"><span>Trade Watcher</span></a></div>
+    <div class="media_supported_cont">
+      <a class="tgme_widget_message_photo_wrap" href="https://t.me/stockbot/9139"></a>
+      <div class="tgme_widget_message_text js-message_text"><b>Michael Burry</b> doubled puts<br><a href="https://t.me/futures">@futures</a></div>
+    </div>
+    <div class="media_not_supported_cont"><div class="message_media_not_supported_label">Please open Telegram to view this post</div></div>
+    <span class="tgme_widget_message_meta"><a class="tgme_widget_message_date"><time datetime="2026-11-19T21:00:00+00:00"></time></a></span>
+  </div>
+</div>
+<div class="tgme_widget_message text_not_supported_wrap js-widget_message" data-post="stockbot/9140">
+  <div class="tgme_widget_message_bubble">
+    <div class="media_supported_cont">
+      <div class="tgme_widget_message_reply"><div class="tgme_widget_message_text">quoted</div></div>
+      <div class="tgme_widget_message_text">text only</div>
+    </div>
+    <span class="tgme_widget_message_meta"><a class="tgme_widget_message_date"><time datetime="2026-11-19T21:01:00+00:00"></time></a></span>
+  </div>
+</div>
+</body></html>`
+
+Deno.test('parsePage: text of a post the preview can\'t fully show (media_supported_cont)', () => {
+  const [a, b] = parsePage(NOT_SUPPORTED, 'stockbot').posts
+  assertEquals(a.text, 'Michael Burry doubled puts\n@futures')
+  assertEquals(a.links, ['https://t.me/futures'])
+  assertEquals(a.has_media, true)
+  assertEquals(b.text, 'text only') // own text, not the quoted reply
+  assertEquals(b.has_media, false)
+})
+
 // ---- real preview page --------------------------------------------------------------------------------
 // t.me/s/ehdwl as served on 2026-11-16 (fixtures/, saved by `deno task fixtures telegram ehdwl`), tagged with the real
 // stock list of 2026-11-13 (the KRX fixtures).
@@ -133,4 +169,93 @@ realPageTest('pageProblems: renamed text class (posts found, text empty) is refu
   assertEquals(page.posts.length, 20)
   const blank = page.posts.filter((p) => !p.text && !p.has_media).length
   assertEquals(pageProblems(edited, page, 'ehdwl'), [`${blank} of 20 posts have no text and no media (text format changed?)`])
+})
+
+// t.me/s/stockbot as served on 2026-11-20 (`deno task fixtures telegram stockbot`): every post is in the
+// text_not_supported_wrap layout (text inside media_supported_cont). Skipped without the fixture.
+const STOCKBOT = new URL('./fixtures/tme_s_stockbot.html', import.meta.url)
+const stockbotHtml = (() => {
+  try {
+    return Deno.readTextFileSync(STOCKBOT)
+  } catch {
+    return null
+  }
+})()
+
+Deno.test({
+  name: 'real page: text_not_supported_wrap posts (stockbot) have their text, and the page passes the checks',
+  ignore: !stockbotHtml,
+  fn: () => {
+    const page = parsePage(stockbotHtml!, 'stockbot')
+    assertEquals(page.title, 'Trade Watcher')
+    assertEquals(page.posts.length, 20)
+    assertEquals(page.posts.every((p) => p.text.length > 0), true)
+    assertEquals(page.posts.every((p) => !/Please open Telegram/.test(p.text)), true)
+    assertEquals(pageProblems(stockbotHtml!, page, 'stockbot'), [])
+  },
+})
+
+// ---- where pages come from (setPageSource, relayPages) ----------------------------------------------------------
+
+const ONE_POST = `<html><head><meta property="og:title" content="Stock News"></head><body>
+<div class="tgme_widget_message" data-post="stocknews/7"><div class="tgme_widget_message_bubble">
+<div class="tgme_widget_message_text">hello</div>
+<a class="tgme_widget_message_date"><time datetime="2026-11-20T01:00:00+00:00"></time></a></div></div></body></html>`
+
+async function withSource<T>(source: PageSource, fn: () => Promise<T>): Promise<T> {
+  setPageSource(source)
+  try {
+    return await fn()
+  } finally {
+    setPageSource(directPage)
+  }
+}
+
+Deno.test('fetchPage: reads from the page source; a redirect is "no preview", another status an error', async () => {
+  const asked: unknown[] = []
+  const page = await withSource(async (c, b) => (asked.push([c, b]), { status: 200, html: ONE_POST }), () => fetchPage('stocknews', 9))
+  assertEquals(asked, [['stocknews', 9]])
+  assertEquals(page?.posts.map((p) => p.text), ['hello'])
+  assertEquals(await withSource(async () => ({ status: 302, html: '' }), () => fetchPage('stocknews')), null)
+  await assertRejects(() => withSource(async () => ({ status: 429, html: '' }), () => fetchPage('stocknews')), Error, 'HTTP 429')
+})
+
+async function withFetch<T>(stub: typeof fetch, fn: () => Promise<T>): Promise<T> {
+  const real = globalThis.fetch
+  globalThis.fetch = stub
+  try {
+    return await fn()
+  } finally {
+    globalThis.fetch = real
+  }
+}
+
+Deno.test('relayPages: asks telegram-ingest in the region, with the secret, and returns its answer', async () => {
+  let seen: { url: string; headers: Headers } | null = null
+  const stub = (async (url: string, init?: RequestInit) => {
+    seen = { url, headers: new Headers(init?.headers) }
+    return Response.json({ status: 200, html: ONE_POST })
+  }) as typeof fetch
+  const fallback: PageSource = () => Promise.reject(new Error('fallback used'))
+  const raw = await withFetch(stub, () => relayPages('https://x.supabase.co', 's3cret', 'ap-northeast-2', fallback)('stocknews', 42))
+  assertEquals(raw.status, 200)
+  assertEquals(seen!.url, 'https://x.supabase.co/functions/v1/telegram-ingest?page=stocknews&before=42')
+  assertEquals(seen!.headers.get('x-region'), 'ap-northeast-2')
+  assertEquals(seen!.headers.get('x-ingest-secret'), 's3cret')
+})
+
+Deno.test('relayPages: Telegram\'s redirect passes through; a failed relay falls back to fetching here', async () => {
+  const fallback: PageSource = async () => ({ status: 200, html: 'from here' })
+  const relay = relayPages('https://x.supabase.co', 's', 'ap-northeast-2', fallback)
+  const redirect = await withFetch((async () => Response.json({ status: 302, html: '' })) as typeof fetch, () => relay('stocknews'))
+  assertEquals(redirect.status, 302) // Telegram's answer, not a relay failure
+  for (const failing of [
+    async () => new Response('unauthorized', { status: 401 }),
+    async () => Response.json({ error: 'x' }, { status: 502 }),
+    async () => Response.json({ unexpected: true }),
+    async () => { throw new TypeError('network') },
+  ]) {
+    const raw = await withFetch(failing as typeof fetch, () => relay('stocknews'))
+    assertEquals(raw.html, 'from here')
+  }
 })

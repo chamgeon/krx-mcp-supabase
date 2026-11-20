@@ -7,6 +7,14 @@
 //   POST /functions/v1/telegram-ingest?channel=ehdwl   -> poll one channel
 //   POST /functions/v1/telegram-ingest?gate=500        -> no polling: gate up to 500 ungated posts now (e.g. the posts
 //                                                         stored before the gate, at once instead of 40 per run)
+//   POST /functions/v1/telegram-ingest?page=stockbot[&before=9139]
+//                                                      -> relay: one preview page as fetched from this region,
+//                                                         {status, html}. mcp runs in Mumbai, where Telegram hides
+//                                                         some previews, and fetches its pages through this in Seoul
+//                                                         (../_shared/telegram.ts, relayPages). Not an ingest run: not
+//                                                         recorded in ingest_runs.
+//
+// The cron sends x-region: ap-northeast-2, so runs (and the relay) fetch from Seoul (log 2026-11-20).
 //
 // Channels that keep failing (e.g. the owner turned the preview off) are retried at most hourly. Returns 500 when any
 // channel fails, so failures show up in the function logs.
@@ -24,7 +32,7 @@
 import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import {
-  backfillChannel, type BackfillResult, BACKFILL_STALE_MS, syncChannel, type SyncResult,
+  backfillChannel, type BackfillResult, BACKFILL_STALE_MS, channelName, directPage, syncChannel, type SyncResult,
 } from '../_shared/telegram.ts'
 import { monitored, sendTelegram } from '../_shared/ops.ts'
 import Anthropic from 'npm:@anthropic-ai/sdk@1.5.0'
@@ -32,6 +40,7 @@ import { channelAlerts } from './alerts.ts'
 import { GATE_MAX, gateBatch, type GateSummary, refreshUsSymbols } from './gating.ts'
 
 const INGEST_SECRET = Deno.env.get('INGEST_SECRET')!
+const HERE_REGION = Deno.env.get('SB_REGION') || null // set by Supabase; unset locally
 const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')
 const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null
 const supabase = createClient(
@@ -51,7 +60,7 @@ const wholeRunFailed = (body: unknown) => {
   return !Array.isArray(b?.results) || typeof b?.gate?.error === 'string'
 }
 
-Deno.serve(monitored('telegram-ingest', supabase, async (req) => {
+const ingest = monitored('telegram-ingest', supabase, async (req) => {
   if (req.headers.get('x-ingest-secret') !== INGEST_SECRET) {
     return new Response('unauthorized', { status: 401 })
   }
@@ -117,6 +126,7 @@ Deno.serve(monitored('telegram-ingest', supabase, async (req) => {
   const failed = results.filter((r) => !r.ok)
   return Response.json(
     {
+      ran_in: HERE_REGION,
       polled: results.length,
       skipped: (channels?.length ?? 0) - due.length,
       new_posts: results.reduce((n, r) => n + r.new_posts, 0),
@@ -127,4 +137,22 @@ Deno.serve(monitored('telegram-ingest', supabase, async (req) => {
     },
     { status: failed.length || (gate && 'error' in gate && gate.error) ? 500 : 200 },
   )
-}, { alertOn: wholeRunFailed }))
+}, { alertOn: wholeRunFailed })
+
+// The page relay (see the top). Only a valid channel name and a numeric `before`: it fetches t.me previews, nothing else.
+async function relayPage(params: URLSearchParams): Promise<Response> {
+  const raw = params.get('page') ?? ''
+  const channel = channelName(raw)
+  const before = params.get('before')
+  if (!channel || channel !== raw.toLowerCase() || (before !== null && !/^\d{1,12}$/.test(before))) {
+    return Response.json({ error: 'page: a channel name, and before as a number' }, { status: 400 })
+  }
+  return Response.json(await directPage(channel, before ? Number(before) : undefined))
+}
+
+Deno.serve((req) => {
+  const params = new URL(req.url).searchParams
+  if (!params.has('page')) return ingest(req)
+  if (req.headers.get('x-ingest-secret') !== INGEST_SECRET) return new Response('unauthorized', { status: 401 })
+  return relayPage(params).catch((e) => Response.json({ error: (e as Error).message }, { status: 502 }))
+})

@@ -52,11 +52,11 @@ export function parseKisRows(
 
 /**
  * Stocks whose price is an expected price from a call auction (예상체결가), not a trade, by KIS's hour_cls_code:
- * '0' 예상체결 없음 (a traded price in the regular session), 'B' 정규장전 예상체결 (the pre-open auction), 'A' 정규장후
- * 예상체결 (after the regular close: the closing auction and the 16:00–20:00 after-market), 'C' 장중 예상체결 (VI).
- * code → hour_cls_code, for
- * the codes other than '0'. An expected price can sit outside the day's traded range (before the open there's no
- * range at all), so these rows are left out of the range check.
+ * '0' 예상체결 없음 (a traded price: the regular session, and the 16:00–20:00 after-market too, whose trades KIS also
+ * counts in the day's high/low: fixtures/intstock_multprice_20261119.json, 18:08 KST), 'B' 정규장전 예상체결 (the
+ * pre-open auction), 'A' 정규장후 예상체결 (an auction after the regular close, e.g. the closing auction), 'C' 장중
+ * 예상체결 (VI). Returns code → hour_cls_code for the codes other than '0'. An expected price can sit outside the
+ * day's traded range (before the open there's no range at all), so these rows are left out of the range check.
  */
 export function auctionCodes(output: Record<string, string>[] | undefined): Map<string, string> {
   return new Map(

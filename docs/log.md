@@ -792,6 +792,38 @@ What was done and why. Oldest first; new entries go at the bottom.
   was deployed before its migration reached production, because the deploy steps given said plain `supabase db push`,
   which in CLI v3 targets the local stack. The right command is `supabase db push --remote`, now in CLAUDE.md.
 
+## 2026-11-19 — KIS after-market: traded prices, change from the previous close
+- **Checked:** the after-market runs (수능 day: regular session to 16:30). Between the 17:05 and 18:05 snapshots 1,911
+  of 2,771 closes changed and volume grew for 2,157, so `intstock-multprice` (market `J`, KRX) follows after-market
+  trades. `close − change` equals the previous day's official close for 2,659 of 2,661 traded stocks (the other 2:
+  SPACs with a rounded base price), so `change`/`fluc_rt` stay measured from the previous close (CORR-1 met).
+- **Found:** a raw response at 18:08 (fixtures/intstock_multprice_20261119.json): after-market rows have
+  `hour_cls_code` `0`, not `A`, and KIS's high/low include the after-market trades (every price inside the range, in
+  the fixture and in all 2,661 traded rows of the 18:05 snapshot). So the after-market needs no exemption from the
+  low..high check; `A` is an auction after the close. The 18:05 snapshot is kept as
+  fixtures/live_prices_20261119_1805.json (gitignored).
+- Not collected: NXT (Nextrade), a separate venue with its own after-market (market code `NX`, combined `UN`).
+
+## 2026-11-20 — Telegram fetched from Seoul; posts the preview can't fully show
+- **Found:** adding @stockbot failed with "no public web preview", though t.me/s/stockbot loads in a browser. The add
+  ran in Mumbai (`mcp`, forwarded to `DB_REGION`), where Telegram redirects t.me/s/stockbot to t.me/stockbot (a stub
+  page: no title, no subscriber count). A temporary probe function (deployed, called with `x-region`, deleted) got
+  the full page from Seoul, Tokyo and Singapore, and the redirect only from ap-south-1; insidertracking loaded
+  everywhere. So it's a per-country restriction on that channel, not datacenter IPs. MTProto (a user account) isn't
+  needed for it.
+- **Done:** t.me is fetched from Seoul. The telegram-ingest cron sends `x-region: ap-northeast-2` (production job
+  updated, `sql/cron.example.sql`); its response has `ran_in`. `mcp` keeps running next to the database and, with
+  `TG_REGION=ap-northeast-2` (secret), fetches every page (add check, refresh, background backfill) through
+  telegram-ingest's new `?page=<channel>&before=<id>` relay, which returns `{status, html}` as fetched there and isn't
+  an ingest run. If the relay fails (network, auth, 5xx), the page is fetched where `mcp` runs (`relayPages`).
+- **Done:** `parsePage` also reads a post's text from `media_supported_cont`. Every stockbot post is in the
+  `text_not_supported_wrap` layout (custom emoji): the text sits one level down, next to a "Please open Telegram"
+  notice, so 16 of 20 posts parsed blank and `pageProblems` refused the page. Tested inline and with the real page
+  (fixtures/tme_s_stockbot.html, gitignored).
+- **Result:** @stockbot added in production: "Trade Watcher", 160 posts back to 11-08 (8 backfill pages), 1 blank.
+- Also today: `us_symbols` refreshed early (its `updated_at` set back a day) to pick up ANT, listed 11-19; ANT added
+  to `us_tickers` of the 94 posts tagged `anthropic-ipo` by hand, without re-gating them.
+
 ## Open
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
   next to the database, every minute) vs. moving the project to us-east-1. A ping every minute would keep workers
@@ -818,10 +850,7 @@ What was done and why. Oldest first; new entries go at the bottom.
   knee and the first bottleneck (Postgres connections or compute, PostgREST, Edge workers, the forward hop), using
   the per-step `timings`. Database-backed read-only tools only, outside the session (no KIS or t.me calls), via the
   operator key (unlogged); short runs, within free-plan fair use. Framed as knowing the limits, not as needing scale.
-- Tonight (11-19), the first after-market runs: check that the 17:05–20:05 runs pass with `A` rows, and that `change`
-  is measured from the previous close (`close - change` = the previous day's `daily_prices.close` for traded rows).
-  If KIS measures it from today's 종가, `fluc_rt` in screens is wrong after 16:00. Also check tonight's report for the
-  `live_prices` cleanup.
+- 11-30: check the `live_prices` cleanup (no day older than 10 days).
 - Telegram gate, after deploy: watch the backlog drain (`gate.left` in telegram-ingest's `ingest_runs` summary), the
   failure count, and the first `us_symbols` refresh; spot-check hidden noise with `include_noise: true`.
 - Normalized chunks for Telegram posts (dropped from Phase 2 on 11-19, needed after all): posts stored as clean,

@@ -89,7 +89,8 @@ select cron.schedule(
   $$
   select net.http_post(
     url := 'https://<PROJECT_REF>.supabase.co/functions/v1/telegram-ingest',
-    headers := jsonb_build_object('Content-Type', 'application/json', 'x-ingest-secret', '<INGEST_SECRET>'),
+    -- x-region: fetch t.me from Seoul; Telegram hides some channels' previews from Mumbai (log 2026-11-20)
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-region', 'ap-northeast-2', 'x-ingest-secret', '<INGEST_SECRET>'),
     body := '{}'::jsonb,
     timeout_milliseconds := 150000
   );

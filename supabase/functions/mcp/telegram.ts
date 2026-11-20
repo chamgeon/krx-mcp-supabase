@@ -5,10 +5,19 @@ import type { McpServer } from 'npm:@modelcontextprotocol/server@2.4.0'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { z } from 'npm:zod@4.6.7'
 import {
-  BACKFILL_DAYS, BACKFILL_MAX_PAGES, backfillChannel, channelName, fetchPage, syncChannel, type TgPage,
+  BACKFILL_DAYS, BACKFILL_MAX_PAGES, backfillChannel, channelName, fetchPage, relayPages, setPageSource, syncChannel,
+  type TgPage,
 } from '../_shared/telegram.ts'
 import { normTicker } from '../_shared/gate.ts'
 import { early, step } from './timing.ts'
+
+// Where this function fetches t.me pages from. It runs next to the database in Mumbai, where Telegram hides some
+// channels' previews (@stockbot, log 2026-11-20), so with TG_REGION set (ap-northeast-2) every page (the add check,
+// refreshes, background backfills) goes through telegram-ingest's ?page relay there. Unset locally and in tests.
+const TG_REGION = Deno.env.get('TG_REGION') || null
+if (TG_REGION && Deno.env.get('SB_REGION') !== TG_REGION) {
+  setPageSource(relayPages(Deno.env.get('SUPABASE_URL')!, Deno.env.get('INGEST_SECRET')!, TG_REGION))
+}
 
 const MAX_CHANNELS = 50 // cap on the deployment's collection, so adding channels can't turn it into a crawler
 
