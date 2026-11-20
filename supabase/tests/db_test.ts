@@ -798,3 +798,92 @@ Deno.test('eventsAt: an event is offered only to posts inside its window', async
   assertEquals(ids('2026-11-19T00:00:00Z'), ['open', 'nov'])
   assertEquals(ids('2026-10-15T00:00:00Z'), ['open']) // active_to is exclusive
 })
+
+// ---- YouTube: polling (RSS) and transcripts (fake feed, fake actor) ----
+
+import { type ActorRecord, pollChannel, transcriptBatch } from '../functions/_shared/youtube.ts'
+
+const YT_CHANNEL = 'UCtesttesttesttesttest12' // 24 characters: UC + 22
+const ytEntry = (id: string, at: string, short = false) => `<entry><yt:videoId>${id}</yt:videoId><title>video ${id}</title>
+  <link rel="alternate" href="https://www.youtube.com/${short ? 'shorts/' + id : 'watch?v=' + id}"/><published>${at}</published>
+  <media:group><media:description>about ${id}</media:description></media:group></entry>`
+const ytFeed = (entries: string[]) => (() =>
+  Promise.resolve(new Response(`<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>테스트 채널</title>${entries.join('')}</feed>`))) as unknown as typeof fetch
+const ytId = (n: number) => `vid${String(n).padStart(8, '0')}` // 11 characters
+const hoursAgo = (h: number) => new Date(Date.now() - h * 3600_000).toISOString()
+
+async function withYtChannel(fn: () => Promise<void>) {
+  await db.from('youtube_channels').delete().eq('channel_id', YT_CHANNEL)
+  const { error } = await db.from('youtube_channels').insert({ channel_id: YT_CHANNEL })
+  if (error) throw new Error(error.message)
+  try {
+    await fn()
+  } finally {
+    await db.from('youtube_channels').delete().eq('channel_id', YT_CHANNEL) // videos go with it (cascade)
+  }
+}
+const ytVideos = async () =>
+  (await db.from('youtube_videos').select('*').eq('channel_id', YT_CHANNEL).order('published_at', { ascending: false })).data ?? []
+
+Deno.test('pollChannel: the first poll stores the newest 5 (no Shorts), later polls only newer videos', async () => {
+  await withYtChannel(async () => {
+    const seven = [1, 2, 3, 4, 5, 6, 7].map((n) => ytEntry(ytId(n), hoursAgo(10 - n)))
+    const r1 = await pollChannel(db, YT_CHANNEL, ytFeed([...seven, ytEntry(ytId(99), hoursAgo(0.5), true)]))
+    assertEquals([r1.ok, r1.new_videos], [true, 5])
+    let v = await ytVideos()
+    assertEquals(v.map((x) => x.video_id), [7, 6, 5, 4, 3].map(ytId))
+    assertEquals([v[0].title, v[0].description, v[0].transcript_status, v[0].transcript], [`video ${ytId(7)}`, `about ${ytId(7)}`, 'pending', null])
+    const { data: ch } = await db.from('youtube_channels').select('title, poll_errors, last_polled_at').eq('channel_id', YT_CHANNEL).single()
+    assertEquals([ch!.title, ch!.poll_errors, !!ch!.last_polled_at], ['테스트 채널', 0, true])
+
+    // a new upload: only it is stored (1 and 2, older than anything stored, are never filled in)
+    const r2 = await pollChannel(db, YT_CHANNEL, ytFeed([ytEntry(ytId(8), hoursAgo(1)), ...seven]))
+    assertEquals(r2.new_videos, 1)
+    v = await ytVideos()
+    assertEquals(v.length, 6)
+
+    // a failing feed is recorded on the channel and counted
+    const r3 = await pollChannel(db, YT_CHANNEL, (() => Promise.resolve(new Response('gone', { status: 404 }))) as unknown as typeof fetch)
+    assertEquals([r3.ok, r3.error], [false, `feed ${YT_CHANNEL}: HTTP 404`])
+    const { data: ch2 } = await db.from('youtube_channels').select('poll_errors, last_error').eq('channel_id', YT_CHANNEL).single()
+    assertEquals(ch2!.poll_errors, 1)
+  })
+})
+
+Deno.test('transcriptBatch: transcripts saved; missing ones retried or given up on; a failed call changes nothing', async () => {
+  await withYtChannel(async () => {
+    const rows = [
+      { video_id: ytId(1), published_at: hoursAgo(1) }, // gets a transcript
+      { video_id: ytId(2), published_at: hoursAgo(2) }, // none yet: retried
+      { video_id: ytId(3), published_at: hoursAgo(72) }, // none, too old: given up
+      { video_id: ytId(4), published_at: hoursAgo(3) }, // bad id: failed
+      { video_id: ytId(5), published_at: hoursAgo(4), next_attempt_at: hoursAgo(-1) }, // not due yet
+    ].map((r) => ({ next_attempt_at: hoursAgo(0.1), ...r, channel_id: YT_CHANNEL, title: r.video_id })) // same keys in every row
+    const { error } = await db.from('youtube_videos').insert(rows)
+    if (error) throw new Error(error.message)
+
+    // the actor is down: nothing changes, the error is reported
+    const down = await transcriptBatch(db, () => Promise.reject(new Error('apify: HTTP 401: invalid token')))
+    assertEquals([down.fetched, down.waiting, down.left, down.error], [0, 0, 4, 'transcripts: apify: HTTP 401: invalid token'])
+    assertEquals((await ytVideos()).every((v) => v.attempts === 0 && v.transcript_status === 'pending'), true)
+
+    const asked: string[][] = []
+    const records: Record<string, ActorRecord> = {
+      [ytId(1)]: { success: true, video_id: ytId(1), language: 'ko', is_auto_generated: true, transcript: [{ text: '오늘 시황', start: 0, duration: 2 }, { text: '정리', start: 2, duration: 1 }], metadata: { duration_seconds: 245 } },
+      [ytId(2)]: { success: false, video_id: ytId(2), code: 'NO_TRANSCRIPT', error: 'no captions' },
+      [ytId(3)]: { success: false, video_id: ytId(3), code: 'NO_TRANSCRIPT', error: 'no captions' },
+      [ytId(4)]: { success: false, video_id: ytId(4), code: 'VALIDATION_FAILED', error: 'bad id' },
+    }
+    const sum = await transcriptBatch(db, (ids, lang) => {
+      asked.push([lang, ...ids])
+      return Promise.resolve(ids.map((id) => records[id]))
+    })
+    assertEquals(asked, [['ko', ytId(1), ytId(2), ytId(4), ytId(3)]]) // newest first, not-due one left out
+    assertEquals([sum.fetched, sum.waiting, sum.none, sum.failed, sum.left, sum.error], [1, 1, 1, 1, 0, undefined])
+    const by = Object.fromEntries((await ytVideos()).map((v) => [v.video_id, v]))
+    assertEquals([by[ytId(1)].transcript_status, by[ytId(1)].transcript, by[ytId(1)].transcript_auto, by[ytId(1)].duration_seconds], ['ok', '오늘 시황 정리', true, 245])
+    assertEquals([by[ytId(2)].transcript_status, by[ytId(2)].attempts, by[ytId(2)].last_error], ['pending', 1, 'NO_TRANSCRIPT: no captions'])
+    assert(Date.parse(by[ytId(2)].next_attempt_at) > Date.now() + 10 * 60_000, 'retried later, not right away')
+    assertEquals([by[ytId(3)].transcript_status, by[ytId(4)].transcript_status, by[ytId(5)].attempts], ['none', 'failed', 0])
+  })
+})

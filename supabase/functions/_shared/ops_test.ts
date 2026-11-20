@@ -17,6 +17,11 @@ Deno.test('errorOf: each ingest function reports failures its own way', () => {
     errorOf({ polled: 2, results: [{ channel: 'a', ok: true, new_posts: 1 }, { channel: 'b', ok: false, error: 'no posts parsed' }] }),
     'b: no posts parsed',
   )
+  // youtube-ingest: a channel failed and the transcript call failed as a whole
+  assertEquals(
+    errorOf({ polled: 2, results: [{ channel: 'UCa', ok: false, error: 'feed UCa: HTTP 404' }], transcripts: { error: 'transcripts: apify: HTTP 401: x' } }),
+    'UCa: feed UCa: HTTP 404; transcripts: apify: HTTP 401: x',
+  )
   // nothing recognizable: the caller falls back to the HTTP status
   assertEquals(errorOf({ results: { '20261117': 2789 } }), null)
   assertEquals(errorOf(null), null)

@@ -212,6 +212,46 @@ update telegram_messages set gated_at = null where ts >= now() - interval '30 da
 update telegram_messages set gated_at = null where username = 'insidertracking';
 ```
 
+#### YouTube transcripts
+
+`youtube-ingest` polls each collected YouTube channel's RSS feed every 5 minutes and fetches the transcripts of new
+videos through an [Apify](https://apify.com) actor (`apihq/youtube-transcript-scraper`, about $0.003 a transcript, a
+failed one not charged). YouTube refuses caption requests from cloud IPs, so the transcripts can't be fetched from
+Supabase directly. Create an Apify account, copy its API token (Settings → API & Integrations), then:
+
+```bash
+supabase secrets set APIFY_API_KEY=<Apify API token>
+```
+
+Without it videos are still collected, with their title and description, and wait for a transcript.
+
+Channels are added by hand, by channel id (`UC…`: on the channel page, Share → Copy channel ID, or the
+`<meta itemprop="identifier">` in its page source). `language` is the transcript track asked for:
+
+```sql
+insert into youtube_channels (channel_id, language) values
+  ('UCw8pcmyPWGSik7bjJpeINlA', 'ko'),   -- 기릿의 주식노트
+  ('UCOB62fKRT7b73X7tRxMuN2g', 'ko'),   -- 박종훈의 지식한방
+  ('UC_JJ_NhRqPKcIOj5Ko3W_3w', 'ko'),   -- 오선의 미국 증시 라이브
+  ('UCRCNBeNS8MrOwFV6h6Yjemw', 'ko');   -- 시황맨TV
+```
+
+A new channel's first poll keeps its newest 5 videos; after that every new upload (Shorts are skipped). A transcript
+that isn't there yet (captions take a while after upload; a live stream has none until it ends) is retried after
+15 min, 30 min, 1 h … up to every 8 h, and given up on 48 h after the video was published.
+
+```sql
+-- Videos and their transcript state
+select c.title, v.published_at, v.title, v.transcript_status, length(v.transcript) chars, v.attempts, v.last_error
+from youtube_videos v join youtube_channels c using (channel_id) order by v.published_at desc limit 20;
+
+-- Try a video's transcript again now
+update youtube_videos set transcript_status = 'pending', next_attempt_at = now() where video_id = '<id>';
+
+-- Stop polling a channel (its videos stay)
+update youtube_channels set active = false where channel_id = '<UC…>';
+```
+
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided to Edge Functions automatically.
 
 ### 4. Deploy the functions
@@ -220,6 +260,7 @@ update telegram_messages set gated_at = null where username = 'insidertracking';
 supabase functions deploy kis-ingest
 supabase functions deploy krx-ingest
 supabase functions deploy telegram-ingest
+supabase functions deploy youtube-ingest
 supabase functions deploy mcp
 supabase functions deploy pipeline-report
 ```

@@ -18,6 +18,9 @@
 --               KRX data.
 --   telegram-ingest  every 5 min, daily
 --               new posts from every collected public Telegram channel (one request per channel).
+--   youtube-ingest  every 5 min (2 min after telegram-ingest), daily
+--               new uploads from every collected YouTube channel (its RSS feed), then the transcripts that are
+--               due (Apify; needs the APIFY_API_KEY secret).
 --   pipeline-report  18:00 KST          (09:00 UTC)              daily
 --               Telegram report of the last 24 h of ingest runs (needs the TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
 --               secrets). Already set up? Add only this job.
@@ -110,6 +113,19 @@ select cron.schedule(
   $$
 );
 
+select cron.schedule(
+  'youtube-ingest',
+  '2-57/5 * * * *',
+  $$
+  select net.http_post(
+    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/youtube-ingest',
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-ingest-secret', '<INGEST_SECRET>'),
+    body := '{}'::jsonb,
+    timeout_milliseconds := 150000
+  );
+  $$
+);
+
 -- Ingest runs:  select * from ingest_runs order by started_at desc limit 20;
 -- Check runs:   select * from cron.job_run_details order by start_time desc limit 10;
 -- HTTP results: select * from net._http_response order by created desc limit 10;
@@ -118,4 +134,5 @@ select cron.schedule(
 --               select cron.unschedule('kis-ingest-after-hours');
 --               select cron.unschedule('krx-ingest-morning');
 --               select cron.unschedule('telegram-ingest');
+--               select cron.unschedule('youtube-ingest');
 --               select cron.unschedule('pipeline-report');

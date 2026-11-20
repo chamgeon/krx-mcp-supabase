@@ -844,6 +844,24 @@ What was done and why. Oldest first; new entries go at the bottom.
 - Also today: `us_symbols` refreshed early (its `updated_at` set back a day) to pick up ANT, listed 11-19; ANT added
   to `us_tickers` of the 94 posts tagged `anthropic-ipo` by hand, without re-gating them.
 
+## 2026-11-20 — YouTube transcripts (built, not deployed)
+- **Decided:** transcripts from Apify (`apihq/youtube-transcript-scraper`), new uploads from each channel's RSS feed.
+  **Why:** YouTube's official captions API only serves a video's owner, and its caption files refuse cloud IPs (the
+  libraries' own docs, and reports from November); the RSS feed answers from Supabase (checked from ap-south-1:
+  200, 15 entries). The actor returns one record per video (a failure doesn't fail the batch, and isn't charged):
+  $0.003 a transcript, ~5 s for one video, 23 s for five in one call.
+- **Done:** `youtube_channels` / `youtube_videos` (migration `20261120000000_youtube.sql`) and `youtube-ingest`, every 5
+  minutes: poll each active channel's feed (a first poll keeps the newest 5 videos, later polls every newer one, no
+  Shorts), then fetch up to 10 due transcripts, newest first, one actor call per language. A video without a
+  transcript yet is retried after 15 min … 8 h and given up on ('none') 48 h after publishing; a transcript in another
+  language than the channel's is not taken (the first try without `language` returned YouTube's auto-translated
+  English). A failed feed or a failed actor call fails the run (500 → ingest_runs, hourly alert); a failing channel is
+  retried hourly. Unit tests (feed parsing on a real feed, backfill rule, retry decisions) and DB tests (fake feed,
+  fake actor); checked once end to end on the local stack with 기릿의 주식노트 (5 transcripts, $0.015).
+- Channels (by id): 기릿의 주식노트 `UCw8pcmyPWGSik7bjJpeINlA`, 박종훈의 지식한방 `UCOB62fKRT7b73X7tRxMuN2g`, 오선의 미국
+  증시 라이브 `UC_JJ_NhRqPKcIOj5Ko3W_3w`, 시황맨TV `UCRCNBeNS8MrOwFV6h6Yjemw` (found by name in YouTube search).
+- Auto-generated Korean captions get names wrong (엔트로픽, "SO" for S-Oil), so the gate's name check matters more here.
+
 ## Open
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
   next to the database, every minute) vs. moving the project to us-east-1. A ping every minute would keep workers
@@ -882,3 +900,7 @@ What was done and why. Oldest first; new entries go at the bottom.
   (snippet around the query word), but only matches one spelling (앤스로픽 or Anthropic-only posts drop out). Kept
   as-is for now. Open: how to split (the formatting differs a lot by channel: headings, bullets, prose), and what the
   feed counts (posts or chunks).
+- YouTube, to deploy: `supabase db push --remote`, `supabase secrets set APIFY_API_KEY=…`, deploy youtube-ingest,
+  insert the four channels (README → YouTube transcripts), schedule the `youtube-ingest` job. Then: gate the
+  transcripts (label, stock and event tags, as for Telegram posts; a transcript is ~2–8k characters, a live stream
+  much more), MCP tools to read them, and a YouTube line in the daily report.

@@ -59,6 +59,9 @@ export function errorOf(body: unknown): string | null {
     // and its gate step, when every call failed: { gate: { error } }
     const gate = b.gate as { error?: unknown } | undefined
     if (typeof gate?.error === 'string') out.push(gate.error)
+    // youtube-ingest: same per-channel results, and its transcript step: { transcripts: { error } }
+    const transcripts = b.transcripts as { error?: unknown } | undefined
+    if (typeof transcripts?.error === 'string') out.push(transcripts.error)
   } else if (b.results && typeof b.results === 'object') {
     // krx-ingest: { results: { "20261117": 2789 | "error: …" } }
     for (const [day, r] of Object.entries(b.results)) {
