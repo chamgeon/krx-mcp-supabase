@@ -632,7 +632,7 @@ Deno.test('monitored: alertOn skips the hourly alert for some failures (telegram
 // ---- Telegram gate (migration 20261119000000, telegram-ingest/gating.ts) ----
 
 import type Anthropic from 'npm:@anthropic-ai/sdk@1.5.0'
-import { gateBatch, refreshUsSymbols } from '../functions/telegram-ingest/gating.ts'
+import { gateBatch, refreshUsSymbols, X_POSTS } from '../functions/telegram-ingest/gating.ts'
 
 const GATE_CH = 'testchannel_a'
 const gatePost = (msg_id: number, text: string, extra: Record<string, unknown> = {}) =>
@@ -949,5 +949,51 @@ Deno.test('pollAccounts: a new account is backfilled; later polls ask from the l
     const after = await xAccount()
     assertEquals([after.poll_errors, after.last_error], [1, 'apify: HTTP 402: not enough credit'])
     assertEquals(after.last_polled_at, acc.last_polled_at) // moving it would skip the posts since the last success
+  })
+})
+
+Deno.test('X gate: posts are read with the post they quote, labeled and tagged; an edit or a new event re-gates them', async () => {
+  await withXAccount(async () => {
+    const at = (h: number) => new Date(Date.now() - h * 3600_000).toISOString()
+    const post = (id: string, h: number, text: string, quoted: string | null = null) => ({
+      id, username: X_ACC, ts: at(h), text, url: `https://x.com/${X_ACC}/status/${id}`, quoted_text: quoted, media: quoted ? ['https://pbs.twimg.com/x.png'] : [],
+    })
+    const ins = await db.from('x_posts').insert([post('9100000000000000001', 1, 'This chart says it all', '엔비디아 실적 발표, MS 강세'), post('9100000000000000002', 2, 'gm')])
+    if (ins.error) throw new Error(ins.error.message)
+    const { client, calls } = fakeClaude((text) => text.includes('gm')
+      ? { label: 'noise', companies: [], events: [] }
+      : {
+        label: 'market',
+        companies: [
+          { written: '엔비디아', listed_name: 'NVIDIA', market: 'US', id: 'NVDA' },
+          { written: 'MS', listed_name: 'Microsoft', market: 'US', id: 'MS' }, // corrected to MSFT by the name check
+        ],
+        events: [],
+      })
+    const sum = await gateBatch(db, client, 10, X_POSTS)
+    assertEquals([sum.gated, sum.noise, sum.failed, sum.left], [2, 1, 0, 0])
+    const quoted = calls.find((c) => c.includes('This chart'))!
+    assert(quoted.includes('[quoting another post]') && quoted.includes('엔비디아 실적') && quoted.includes(`@${X_ACC} (X)`), quoted)
+    assert(quoted.includes('Has an image'), 'images count as media')
+    const get = async (id: string) => (await db.from('x_posts').select('label, us_tickers, gate_version, gated_at').eq('id', id).single()).data!
+    const a = await get('9100000000000000001')
+    assertEquals([a.label, a.us_tickers, a.gate_version], ['market', ['MSFT', 'NVDA'], 'v5'])
+    assertEquals((await get('9100000000000000002')).label, 'noise')
+
+    // a poll that sends the same text keeps the tags; an edit re-gates
+    await db.from('x_posts').update({ text: 'gm', likes: 5 }).eq('id', '9100000000000000002')
+    assert((await get('9100000000000000002')).gated_at, 'same text: still gated')
+    await db.from('x_posts').update({ text: 'gm, and NVDA earnings tonight' }).eq('id', '9100000000000000002')
+    assertEquals((await get('9100000000000000002')).gated_at, null)
+
+    // a new event re-gates the X posts in its window too
+    await db.from('telegram_events').delete().eq('id', 'x-test-event')
+    const ev = await db.from('telegram_events').insert({ id: 'x-test-event', description: 'x', active_from: at(1.5) })
+    if (ev.error) throw new Error(ev.error.message)
+    try {
+      assertEquals((await get('9100000000000000001')).gated_at, null)
+    } finally {
+      await db.from('telegram_events').delete().eq('id', 'x-test-event')
+    }
   })
 })

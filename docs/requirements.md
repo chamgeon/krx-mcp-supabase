@@ -79,6 +79,7 @@ column points at the test that proves it, or is empty where none exists yet.
 | FR-X-1 | M | `add_x_account` fetches a new account's latest 20 posts (reposts left out) and follows it; an account with no posts is refused and not kept; at most 20 accounts. | `_shared/x_test.ts`; checked on the local stack with @charliebilello (20 posts, 6 s) |
 | FR-X-2 | M | `x-ingest` asks for every account's posts since its last poll (minus 10 minutes) in one actor run; a failed run leaves the poll point unchanged, so no post is skipped. | db_test: "pollAccounts: …" |
 | FR-X-3 | M | `get_x_feed` returns posts from the user's accounts (or all), newest first, with quoted text and image links, filtered by account, days and every word of `query`; the answer as sent stays ≤ 64 KB, keeping as many of the newest posts as fit and saying how many it left out. | mcp_test: "get_x_feed: …", "X accounts: …"; `mcp/x_test.ts` (fitPosts) |
+| FR-X-4 | M | X posts go through the same gate as Telegram posts (label, KR codes and US tickers that pass the name check, events in their window), read with the post they quote; an edited post or a new event re-gates them; `get_x_feed` hides noise unless `include_noise` and filters by `stock`, `us_stock`, `event`. | db_test: "X gate: …"; mcp_test: "get_x_feed: noise hidden …" |
 
 ### Data pipeline
 

@@ -8,7 +8,7 @@
 import type Anthropic from 'npm:@anthropic-ai/sdk@1.5.0'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0'
 import {
-  askGate, checker, GATE_VERSION, type GateEvent, type GatePost, parseSymbolFile, type Stock, SYMBOL_FILES,
+  askGate, checker, GATE_VERSION, type GateEvent, type GateInput, parseSymbolFile, type Stock, SYMBOL_FILES,
   symbolFileUrl, type UsSymbol,
 } from '../_shared/gate.ts'
 
@@ -104,12 +104,44 @@ async function pool<T>(items: T[], n: number, fn: (x: T) => Promise<void>, until
   return next
 }
 
-/** Gates up to `limit` of the newest ungated posts and writes the results back. */
-export async function gateBatch(supabase: SupabaseClient, client: Anthropic, limit = GATE_BATCH): Promise<GateSummary> {
+// Which posts a gate batch works on: Telegram's (telegram-ingest) or X's (x-ingest). Same columns for the results.
+// deno-lint-ignore no-explicit-any
+type Row = Record<string, any>
+export type GateTarget = {
+  table: string
+  columns: string
+  input: (row: Row) => GateInput // what the model reads
+  key: (row: Row) => Record<string, string | number> // the row to write back to
+  name: (row: Row) => string // in error messages
+}
+export const TELEGRAM_POSTS: GateTarget = {
+  table: 'telegram_messages',
+  columns: 'username, msg_id, ts, text, has_media, forwarded_from',
+  input: (r) => ({ username: r.username, ts: r.ts, text: r.text, has_media: r.has_media, forwarded_from: r.forwarded_from }),
+  key: (r) => ({ username: r.username, msg_id: r.msg_id }),
+  name: (r) => `${r.username}/${r.msg_id}`,
+}
+// An X post is read with the post it quotes (a quote is often only a comment on it), and its images count as media
+export const X_POSTS: GateTarget = {
+  table: 'x_posts',
+  columns: 'id, username, ts, text, quoted_text, media',
+  input: (r) => ({
+    username: `@${r.username} (X)`,
+    ts: r.ts,
+    text: r.quoted_text ? `${r.text}\n\n[quoting another post]\n${r.quoted_text}` : r.text,
+    has_media: (r.media ?? []).length > 0,
+    forwarded_from: null,
+  }),
+  key: (r) => ({ id: r.id }),
+  name: (r) => `@${r.username}/${r.id}`,
+}
+
+/** Gates up to `limit` of the newest ungated posts (Telegram's unless another target is given) and writes the results back. */
+export async function gateBatch(supabase: SupabaseClient, client: Anthropic, limit = GATE_BATCH, target = TELEGRAM_POSTS): Promise<GateSummary> {
   const t0 = performance.now()
   const sum: GateSummary = { gated: 0, noise: 0, failed: 0, left: null, tokens: { input: 0, output: 0 }, ms: 0 }
-  const { data: posts, error } = await supabase.from('telegram_messages')
-    .select('username, msg_id, ts, text, has_media, forwarded_from')
+  const { data: posts, error } = await supabase.from(target.table)
+    .select(target.columns)
     .is('gated_at', null).order('ts', { ascending: false }).limit(limit)
   if (error) throw new Error(error.message)
   if (posts?.length) {
@@ -121,18 +153,18 @@ export async function gateBatch(supabase: SupabaseClient, client: Anthropic, lim
     const allEvents = (ev.data ?? []) as WindowedEvent[]
     const check = checker(stocks, symbols)
     const errors: string[] = []
-    await pool(posts as GatePost[], GATE_CONCURRENCY, async (p) => {
+    await pool(posts as unknown as Row[], GATE_CONCURRENCY, async (p) => {
       try {
-        const a = await askGate(client, p, eventsAt(allEvents, p.ts))
+        const a = await askGate(client, target.input(p), eventsAt(allEvents, p.ts))
         const c = check(a.companies)
-        const { error: e } = await supabase.from('telegram_messages').update({
+        const { error: e } = await supabase.from(target.table).update({
           label: a.label,
           stock_codes: c.kr,
           us_tickers: c.us,
           events: a.events,
           gate_version: GATE_VERSION,
           gated_at: new Date().toISOString(),
-        }).eq('username', p.username).eq('msg_id', p.msg_id)
+        }).match(target.key(p))
         if (e) throw new Error(`save: ${e.message}`)
         sum.gated++
         if (a.label === 'noise') sum.noise++
@@ -140,14 +172,14 @@ export async function gateBatch(supabase: SupabaseClient, client: Anthropic, lim
         sum.tokens.output += a.usage?.output ?? 0
       } catch (e) {
         sum.failed++
-        if (errors.length < 3) errors.push(`${p.username}/${p.msg_id}: ${(e as Error).message.slice(0, 200)}`)
+        if (errors.length < 3) errors.push(`${target.name(p)}: ${(e as Error).message.slice(0, 200)}`)
       }
     }, t0 + GATE_DEADLINE_MS)
     if (errors.length) sum.errors = errors
     // Every call failed: not one odd post but the key, the API or the schema. Fails the run, which alerts (hourly).
     if (sum.failed && !sum.gated && sum.failed >= Math.min(3, posts.length)) sum.error = `gate: every call failed: ${errors[0]}`
   }
-  const { count } = await supabase.from('telegram_messages').select('msg_id', { count: 'exact', head: true }).is('gated_at', null)
+  const { count } = await supabase.from(target.table).select('ts', { count: 'exact', head: true }).is('gated_at', null)
   sum.left = count ?? null
   sum.ms = Math.round(performance.now() - t0)
   return sum

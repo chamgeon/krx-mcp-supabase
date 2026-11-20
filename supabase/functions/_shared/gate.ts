@@ -22,6 +22,8 @@ export type GatePost = {
   has_media: boolean
   forwarded_from: string | null
 }
+// What the gate reads of a post (Telegram's or X's: the source's own key isn't part of it)
+export type GateInput = Omit<GatePost, 'msg_id'>
 export type GateEvent = { id: string; description: string }
 export type Stock = { isu_cd: string; isu_nm: string }
 export type UsSymbol = { ticker: string; name: string; exchange?: string }
@@ -219,7 +221,7 @@ export function outputSchema(events: GateEvent[]) {
   }
 }
 
-export function userMessage(p: GatePost): string {
+export function userMessage(p: GateInput): string {
   const kst = new Date(new Date(p.ts).getTime() + 9 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')
   return [
     `Channel: ${p.username}`,
@@ -245,7 +247,7 @@ export type GateAnswer = {
 /** One post through the gate. Throws on a failed call or an answer that isn't the schema's JSON. */
 export async function askGate(
   client: Anthropic,
-  post: GatePost,
+  post: GateInput,
   events: GateEvent[],
   opts: { thinking?: boolean } = {},
 ): Promise<GateAnswer> {

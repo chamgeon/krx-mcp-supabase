@@ -651,6 +651,12 @@ async function withX(fn: () => Promise<void>) {
       media: [], views: null, likes: null, links: [], is_reply: false, quoted_text: null, quoted_url: null },
   ])
   if (p.error) throw new Error(p.error.message)
+  // gate results: the first post is about NVDA and 돌파전자 and the test event; a fourth, newer post is noise
+  await admin.from('x_posts').update({ label: 'market', stock_codes: ['900001'], us_tickers: ['NVDA'], events: ['test-ipo'], gated_at: ago(0) })
+    .eq('id', '1000000000000000001')
+  const n = await admin.from('x_posts').insert({ id: '1000000000000000004', username: XA, ts: ago(0.5), text: 'gm', url: `https://x.com/${XA}/status/1000000000000000004`,
+    media: [], links: [], label: 'noise', gated_at: ago(0) })
+  if (n.error) throw new Error(n.error.message)
   try {
     await fn()
   } finally {
@@ -672,15 +678,31 @@ test('get_x_feed: one account, newest first, within days; quotes and chart image
   })
 })
 
+test('get_x_feed: noise hidden unless asked; stocks, US stocks and events shown with names and usable as filters', async () => {
+  await withX(async () => {
+    const f = await call('get_x_feed', { account: XA })
+    assertEquals(f.posts.map((p: Json) => p.text), ['The S&P 500 fell 2% today', 'History often rhymes']) // 'gm' is noise
+    assertEquals([f.posts[0].stocks, f.posts[0].us_stocks, f.posts[0].events], [
+      [{ code: '900001', name: '돌파전자' }], [{ ticker: 'NVDA', name: 'NVIDIA Corporation - Common Stock' }], ['test-ipo'],
+    ])
+    const all = await call('get_x_feed', { account: XA, include_noise: true })
+    assertEquals([all.posts[0].text, all.posts[0].noise], ['gm', true])
+    for (const filter of [{ stock: '돌파전자' }, { stock: '900001' }, { us_stock: 'nvda' }, { event: 'test-ipo' }]) {
+      assertEquals((await call('get_x_feed', { account: XA, ...filter })).posts.map((p: Json) => p.link), [`https://x.com/${XA}/status/1000000000000000001`], JSON.stringify(filter))
+    }
+    assert((await call('get_x_feed', { account: XA, us_stock: 'ZZZZ' })).error.includes('Unknown US ticker'))
+  })
+})
+
 test('X accounts: list, follow an existing account (no fetch), feed scope, unfollow', async () => {
   await withX(async () => {
     const all = await call('list_x_accounts')
     const row = all.find((a: Json) => a.account === `@${XA}`)
-    assertEquals([row.name, row.bio, row.followers, row.verified, row.posts, row.active, row.link], ['MCP X Test', 'Markets in charts', 875737, true, 3, true, `https://x.com/${XA}`])
+    assertEquals([row.name, row.bio, row.followers, row.verified, row.posts, row.active, row.link], ['MCP X Test', 'Markets in charts', 875737, true, 4, true, `https://x.com/${XA}`])
 
     const added = await call('add_x_account', { account: `https://x.com/${XA}` })
     assertEquals([added.status, added.bio, added.followers], ['already collected', 'Markets in charts', 875737])
-    assertEquals(added.latest_posts.length, 3)
+    assertEquals(added.latest_posts.length, 4)
     assert((await call('add_x_account', { account: 'not a handle!' })).error.includes('not an X handle'))
 
     const { token } = await testUser()

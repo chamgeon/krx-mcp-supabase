@@ -5,6 +5,7 @@ import type { McpServer } from 'npm:@modelcontextprotocol/server@2.4.0'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { z } from 'npm:zod@4.6.7'
 import { accountName, backfillAccount, xquikPosts } from '../_shared/x.ts'
+import { normTicker } from '../_shared/gate.ts'
 import { step } from './timing.ts'
 
 // Cap on collected accounts: all share one actor run per poll, so the cost is in their posts (~$0.15 per 1,000);
@@ -62,10 +63,16 @@ type PostRow = {
   views: number | null
   likes: number | null
   reposts: number | null
+  label: 'market' | 'noise' | null // set by the gate (x-ingest); null = not gated yet
+  stock_codes: string[]
+  us_tickers: string[]
+  events: string[]
 }
-const POST_COLUMNS = 'id, username, ts, text, url, is_reply, quoted_text, quoted_url, media, links, views, likes, reposts'
+const POST_COLUMNS = 'id, username, ts, text, url, is_reply, quoted_text, quoted_url, media, links, views, likes, reposts, ' +
+  'label, stock_codes, us_tickers, events'
 
-function present(p: PostRow) {
+type Names = { kr: Map<string, string>; us: Map<string, string> }
+function present(p: PostRow, names: Names = { kr: new Map(), us: new Map() }) {
   return {
     account: `@${p.username}`,
     time: kst(p.ts),
@@ -74,6 +81,10 @@ function present(p: PostRow) {
     ...(p.quoted_text ? { quoting: { text: p.quoted_text.slice(0, 500), ...(p.quoted_url ? { link: p.quoted_url } : {}) } } : {}),
     ...(p.media.length ? { images: p.media } : {}),
     ...(p.links.length ? { links: p.links.slice(0, 5) } : {}),
+    ...(p.stock_codes?.length ? { stocks: p.stock_codes.map((c) => ({ code: c, name: names.kr.get(c) ?? null })) } : {}),
+    ...(p.us_tickers?.length ? { us_stocks: p.us_tickers.map((t) => ({ ticker: t, name: names.us.get(t) ?? null })) } : {}),
+    ...(p.events?.length ? { events: p.events } : {}),
+    ...(p.label === 'noise' ? { noise: true } : {}), // only shown with include_noise
     ...(p.views != null ? { views: p.views } : {}),
     ...(p.likes != null ? { likes: p.likes } : {}),
     link: p.url,
@@ -81,6 +92,51 @@ function present(p: PostRow) {
 }
 
 export function registerXTools(server: McpServer, supabase: SupabaseClient, userId: string | null) {
+  // 종목명 and US listed names for the tags in a set of posts (KR names from the latest trading day)
+  async function tagNames(posts: PostRow[]): Promise<Names> {
+    const kr = [...new Set(posts.flatMap((p) => p.stock_codes ?? []))]
+    const us = [...new Set(posts.flatMap((p) => p.us_tickers ?? []))]
+    const [krNames, usNames] = await Promise.all([
+      kr.length
+        ? step('latest_day', supabase.from('available_dates').select('bas_dd').order('bas_dd', { ascending: false }).limit(1))
+          .then(({ data }) => step('stock_names', supabase.from('prices').select('isu_cd, isu_nm').eq('bas_dd', data?.[0]?.bas_dd).in('isu_cd', kr)))
+        : { data: [] as { isu_cd: string; isu_nm: string }[] },
+      us.length ? step('us_names', supabase.from('us_symbols').select('ticker, name').in('ticker', us)) : { data: [] as { ticker: string; name: string }[] },
+    ])
+    return {
+      kr: new Map((krNames.data ?? []).map((r) => [r.isu_cd, r.isu_nm])),
+      us: new Map((usNames.data ?? []).map((r) => [r.ticker, r.name])),
+    }
+  }
+
+  // stock / us_stock / event filters → codes, or an error for an unknown one (as in get_telegram_feed)
+  async function resolveFilters(f: { stock?: string; us_stock?: string; event?: string }) {
+    let code: string | null = null
+    if (f.stock) {
+      const s = f.stock.trim()
+      if (/^\d{6}$/.test(s)) code = s
+      else {
+        const { data: day } = await supabase.from('available_dates').select('bas_dd').order('bas_dd', { ascending: false }).limit(1)
+        const { data } = await step('resolve_stock', supabase.from('prices').select('isu_cd').eq('bas_dd', day?.[0]?.bas_dd).eq('isu_nm', s).limit(1))
+        code = data?.[0]?.isu_cd ?? null
+      }
+      if (!code) return { error: `Unknown stock: ${f.stock}. Pass a 종목코드 or the exact 종목명 (see find_stock).` }
+    }
+    let us: string | null = null
+    if (f.us_stock) {
+      const { data } = await step('resolve_us', supabase.from('us_symbols').select('ticker').eq('ticker', normTicker(f.us_stock)).limit(1))
+      us = data?.[0]?.ticker ?? null
+      if (!us) return { error: `Unknown US ticker: ${f.us_stock}. Pass a listed ticker (see find_us_stock).` }
+    }
+    let event: string | null = null
+    if (f.event) {
+      const { data } = await step('event', supabase.from('telegram_events').select('id').eq('id', f.event.trim().toLowerCase()))
+      event = data?.[0]?.id ?? null
+      if (!event) return { error: `Unknown event: ${f.event} (see list_telegram_events).` }
+    }
+    return { code, us, event }
+  }
+
   async function follow(names: string[]): Promise<boolean> {
     if (!userId || !names.length) return false
     const { error } = await supabase.from('user_x_accounts')
@@ -170,7 +226,7 @@ export function registerXTools(server: McpServer, supabase: SupabaseClient, user
       const r = await ensureAccount(account)
       if (!r.ok) return json({ account, error: r.error })
       const followed = await step('x_follow', follow([r.name]))
-      const [{ data: a }, { data: latest }] = await Promise.all([
+      const [{ data: a }, { data: latestRows }] = await Promise.all([
         step('x_account_row', supabase.from('x_accounts').select('name, description, followers, verified').eq('username', r.name).single()),
         step('x_latest', supabase.from('x_posts').select(POST_COLUMNS).eq('username', r.name).order('ts', { ascending: false }).limit(5)),
       ])
@@ -184,7 +240,11 @@ export function registerXTools(server: McpServer, supabase: SupabaseClient, user
         status: r.status,
         ...(r.posts != null ? { posts_collected: r.posts } : {}),
         ...(followed ? { followed_by_you: true } : { note: 'Collected for everyone on this deployment. Following is not available on this connection.' }),
-        latest_posts: ((latest ?? []) as PostRow[]).map(present),
+        latest_posts: await (async () => {
+          const rows = (latestRows ?? []) as unknown as PostRow[]
+          const names = await tagNames(rows)
+          return rows.map((p) => present(p, names))
+        })(),
       })
     },
   )
@@ -257,17 +317,24 @@ export function registerXTools(server: McpServer, supabase: SupabaseClient, user
       title: 'X 게시물',
       description:
         "Recent posts from the user's followed X accounts (all collected accounts if they follow none), newest first: " +
-        'text, time, the post it quotes, image links (often charts), view and like counts, and a link. With query, ' +
-        'only posts containing all its words. Reposts are not collected.',
+        'text, time, the post it quotes, image links (often charts), the stocks it mentions (KR: stocks, US: ' +
+        'us_stocks) and the events it is about, view and like counts, and a link. Posts are labeled as they arrive and ' +
+        'noise is hidden. With query, only posts containing all its words. Reposts are not collected.',
       inputSchema: z.object({
         account: z.string().optional().describe('one account: @handle'),
+        stock: z.string().optional().describe('종목코드 or exact 종목명: only posts mentioning it'),
+        us_stock: z.string().optional().describe('US ticker (e.g. NVDA; find_us_stock looks one up): only posts mentioning it'),
+        event: z.string().optional().describe('event id (list_telegram_events): only posts about it'),
+        include_noise: z.boolean().default(false).describe('also show posts labeled noise (marked noise: true), e.g. to review the labels'),
         query: z.string().min(1).optional().describe('words every returned post contains (case-insensitive)'),
         days: z.number().int().min(1).max(30).optional().describe('how far back, in days (default 3)'),
         limit: z.number().int().min(1).max(100).optional().describe('posts to return (default 30)'),
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ account, query, days, limit }) => {
+    async ({ account, query, days, limit, stock, us_stock, event, include_noise }) => {
+      const f = await resolveFilters({ stock, us_stock, event })
+      if ('error' in f) return json({ error: f.error })
       let scope: string[] | null = null
       if (account) {
         const name = accountName(account)
@@ -283,9 +350,15 @@ export function registerXTools(server: McpServer, supabase: SupabaseClient, user
       let q = supabase.from('x_posts').select(POST_COLUMNS).gte('ts', since).order('ts', { ascending: false }).limit(limit ?? 30)
       if (scope) q = q.in('username', scope)
       for (const w of (query ?? '').replace(/[%_\\]/g, ' ').split(/\s+/).filter(Boolean)) q = q.ilike('text', `%${w}%`)
+      if (!include_noise) q = q.or('label.is.null,label.neq.noise') // not gated yet: shown, untagged
+      if (f.code) q = q.contains('stock_codes', [f.code])
+      if (f.us) q = q.contains('us_tickers', [f.us])
+      if (f.event) q = q.contains('events', [f.event])
       const { data, error } = await step('x_feed', q)
       if (error) throw new Error(error.message)
-      const posts = ((data ?? []) as PostRow[]).map(present)
+      const rows = (data ?? []) as unknown as PostRow[]
+      const names = await tagNames(rows)
+      const posts = rows.map((p) => present(p, names))
       return json(fitPosts((shown, leftOut) => ({
         scope: scope ? (account ? 'one account' : 'accounts you follow') : 'all collected accounts',
         since: kst(since),

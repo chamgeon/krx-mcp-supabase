@@ -56,7 +56,7 @@ news for why a stock moved.
 | `add_x_account(account)` | Starts collecting an X account (@handle or link): its latest 20 posts now (a few seconds), then new ones every 5 min; reposts left out. Up to 20 accounts |
 | `get_my_x_accounts()` / `update_my_x_accounts(add?, remove?)` | X accounts the user follows (their default feed); follows / unfollows them |
 | `list_x_accounts()` | Collected X accounts: name, bio, followers, verified, profile link, post counts, latest post and poll status |
-| `get_x_feed(account?, query?, days?, limit?)` | Recent posts from the user's accounts (or all), newest first (default 30, at most 100, within 3 days by default): text, quoted post, chart image links, views, likes, link; `query` keeps posts with every word. The answer stays ≤ 64 KB (~90 English posts, ~40–50 Korean) and says how many it left out |
+| `get_x_feed(account?, query?, stock?, us_stock?, event?, include_noise?, days?, limit?)` | Recent posts from the user's accounts (or all), newest first (default 30, at most 100, within 3 days by default): text, quoted post, chart image links, the stocks and events the gate tagged, views, likes, link. Noise is hidden unless `include_noise`; `query` keeps posts with every word; `stock`/`us_stock`/`event` filter by tag. The answer stays ≤ 64 KB (~90 English posts, ~40–50 Korean) and says how many it left out |
 
 ### `screen_stocks`
 
@@ -268,6 +268,8 @@ update youtube_channels set active = false where channel_id = '<UC…>';
 ~$0.15 per 1,000 posts plus ~$0.00007 a run, one run every 5 minutes for all accounts (~$0.55 a month, then the
 posts). A new account gets its latest 20 posts once; after that each run asks for posts since the last poll.
 Reposts are left out in the actor (not paid for); posts, quotes and the author's replies are kept, with image URLs.
+The gate (as for Telegram, with `ANTHROPIC_API_KEY`) labels each new post market or noise and tags its stocks and
+events, reading it with the post it quotes; an event added to `telegram_events` applies to X posts too.
 Accounts are added with the `add_x_account` tool, or by hand (the next run backfills them):
 
 ```sql

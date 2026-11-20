@@ -909,6 +909,16 @@ What was done and why. Oldest first; new entries go at the bottom.
   left to the model to look up: X profile pages show fetchers a login wall, clients differ in web access, and a
   model's memory of a bio can be stale (it was, here, for Bilello's).
 
+## 2026-11-20 — X posts gated like Telegram's (built, not deployed)
+- **Done:** gate columns on `x_posts`, the edit trigger, and the event re-gate extended to X posts (migration
+  `20261120000004_x_gate.sql`). `gateBatch` takes a target (`TELEGRAM_POSTS`, the default, or `X_POSTS`), so both use the
+  same prompt (v5), the same name check against the KRX and US lists, and the same shared `telegram_events`. An X post
+  is read as `@handle (X)` with the post it quotes appended (a quote is often only a comment on it), and its images
+  count as media. x-ingest gates up to 40 posts a run after polling (the 80 stored posts drain in two runs).
+  `get_x_feed` shows `stocks`, `us_stocks`, `events`, hides noise unless `include_noise`, and filters by them.
+- Not checked yet on real posts with the real model (tests use a fake Claude): after deploy, spot-check a run's
+  labels and tags.
+
 ## Open
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
   next to the database, every minute) vs. moving the project to us-east-1. A ping every minute would keep workers
@@ -951,5 +961,5 @@ What was done and why. Oldest first; new entries go at the bottom.
   transcripts (label, stock and event tags, as for Telegram posts; a live stream's 80k+ characters needs chunks or
   a summary first), and a YouTube line in the daily report. MCP tools: deploy `mcp` after `supabase db push --remote`
   (migration 20261120000001).
-- X: deploy (`supabase db push --remote`, deploy x-ingest and mcp, schedule the `x-ingest` job, add @charliebilello),
-  then gate the posts like Telegram's.
+- X: deployed with 4 accounts (Bilello, Bespoke, SentimenTrader, Liz Ann Sonders). Gate: deploy migration
+  `20261120000004`, x-ingest and mcp, then check the first gated posts.
