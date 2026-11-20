@@ -899,7 +899,7 @@ const xItem = (id: number, minutesAgo: number, over: Partial<XItem> = {}): XItem
   text: `post ${id}`,
   createdAt: new Date(Date.now() - minutesAgo * 60_000).toUTCString(),
   likeCount: id,
-  author: { id: '42', username: 'XTestAccount', name: 'X Test' },
+  author: { id: '42', username: 'XTestAccount', name: 'X Test', description: 'Charts and stats', followers: 1234, isBlueVerified: true },
   ...over,
 })
 
@@ -931,7 +931,7 @@ Deno.test('pollAccounts: a new account is backfilled; later polls ask from the l
     assertEquals([asked.length, asked[0].handles, asked[0].perAccount, asked[0].sinceTime], [1, [X_ACC], 20, undefined])
     assertEquals([s1.new_posts, s1.backfilled.map((b) => [b.account, b.ok, b.posts])], [1, [[X_ACC, true, 1]]])
     let acc = await xAccount()
-    assertEquals([acc.name, acc.x_user_id, acc.last_error, !!acc.last_polled_at], ['X Test', '42', null, true])
+    assertEquals([acc.name, acc.x_user_id, acc.description, acc.followers, acc.verified, acc.last_error, !!acc.last_polled_at], ['X Test', '42', 'Charts and stats', 1234, true, null, true])
     const polledAt = Date.parse(acc.last_polled_at)
 
     // next poll: from the last poll minus the overlap; the known post's counts refresh, the new one is added

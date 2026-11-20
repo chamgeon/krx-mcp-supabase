@@ -124,7 +124,7 @@ export function registerXTools(server: McpServer, supabase: SupabaseClient, user
 
   // Accounts (all, or these) with post counts and the latest post
   async function accountRows(names: string[] | null, withPollState: boolean) {
-    let aq = supabase.from('x_accounts').select('username, name, active, last_polled_at, last_error').order('username')
+    let aq = supabase.from('x_accounts').select('username, name, description, followers, verified, active, last_polled_at, last_error').order('username')
     if (names) aq = aq.in('username', names)
     const { data: accounts, error } = await step('x_accounts', aq)
     if (error) throw new Error(error.message)
@@ -137,6 +137,9 @@ export function registerXTools(server: McpServer, supabase: SupabaseClient, user
       rows.push({
         account: `@${a.username}`,
         name: a.name,
+        ...(a.description ? { bio: a.description } : {}),
+        ...(a.followers != null ? { followers: a.followers } : {}),
+        ...(a.verified ? { verified: true } : {}),
         link: `https://x.com/${a.username}`,
         posts: count ?? 0,
         last_post: last?.[0]?.ts ? kst(last[0].ts) : null,
@@ -168,12 +171,16 @@ export function registerXTools(server: McpServer, supabase: SupabaseClient, user
       if (!r.ok) return json({ account, error: r.error })
       const followed = await step('x_follow', follow([r.name]))
       const [{ data: a }, { data: latest }] = await Promise.all([
-        step('x_account_row', supabase.from('x_accounts').select('name').eq('username', r.name).single()),
+        step('x_account_row', supabase.from('x_accounts').select('name, description, followers, verified').eq('username', r.name).single()),
         step('x_latest', supabase.from('x_posts').select(POST_COLUMNS).eq('username', r.name).order('ts', { ascending: false }).limit(5)),
       ])
       return json({
         account: `@${r.name}`,
         name: a?.name ?? null,
+        ...(a?.description ? { bio: a.description } : {}),
+        ...(a?.followers != null ? { followers: a.followers } : {}),
+        ...(a?.verified ? { verified: true } : {}),
+        link: `https://x.com/${r.name}`,
         status: r.status,
         ...(r.posts != null ? { posts_collected: r.posts } : {}),
         ...(followed ? { followed_by_you: true } : { note: 'Collected for everyone on this deployment. Following is not available on this connection.' }),
@@ -187,8 +194,8 @@ export function registerXTools(server: McpServer, supabase: SupabaseClient, user
     {
       title: '내 X 계정',
       description:
-        'The X accounts the current user follows (their default for get_x_feed), with post counts and the latest ' +
-        'post. All collected accounts: list_x_accounts.',
+        'The X accounts the current user follows (their default for get_x_feed): name, bio, followers, profile link, ' +
+        'post counts and the latest post. All collected accounts: list_x_accounts.',
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
     },
@@ -235,7 +242,9 @@ export function registerXTools(server: McpServer, supabase: SupabaseClient, user
     'list_x_accounts',
     {
       title: '수집 중인 X 계정',
-      description: 'X accounts being collected on this deployment, with post counts, the latest post, and poll status.',
+      description:
+        'X accounts being collected on this deployment: name, bio, followers, verified, profile link, post counts, the ' +
+        'latest post, and poll status.',
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
     },

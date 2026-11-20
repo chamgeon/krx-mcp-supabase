@@ -2,7 +2,7 @@
 // Run from the repo root: deno task test
 
 import { assert, assertEquals } from 'jsr:@std/assert@1.0.19'
-import { accountName, toRow, type XItem } from './x.ts'
+import { accountName, authorProfile, toRow, type XItem } from './x.ts'
 
 Deno.test('accountName normalizes the ways people paste an account', () => {
   for (const s of ['@CharlieBilello', 'charliebilello', 'x.com/charliebilello', 'https://twitter.com/charliebilello/status/1', 'https://www.x.com/@charliebilello']) {
@@ -67,4 +67,12 @@ Deno.test({
     for (const r of rows) assert(r!.username === 'charliebilello' && r!.text && r!.ts.startsWith('2026-'), JSON.stringify(r))
     assert(rows.some((r) => r!.media.length), 'charts come as image URLs')
   },
+})
+
+Deno.test('authorProfile: id, name, bio, followers, verified; only the fields present, so a missing bio erases nothing', () => {
+  assertEquals(authorProfile({ id: '1413027896', username: 'charliebilello', name: 'Charlie Bilello', description: ' Chief Market Strategist ', followers: 875737, isBlueVerified: true }), {
+    x_user_id: '1413027896', name: 'Charlie Bilello', description: 'Chief Market Strategist', followers: 875737, verified: true,
+  })
+  assertEquals(authorProfile({ username: 'x', name: 'X' }), { name: 'X' })
+  assertEquals(authorProfile({ username: 'x', description: '', verified: false }), { description: null, verified: false })
 })

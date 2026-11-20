@@ -902,6 +902,12 @@ What was done and why. Oldest first; new entries go at the bottom.
 - `get_x_feed` keeps its answer, as sent, ≤ 64 KB (SIZE-2), as many of the newest posts as fit (~90 of Bilello's,
   ~530 bytes each), and says how many it left out.
 - Not gated yet (no noise label or stock tags on X posts).
+- Deployed 11-20: migration `20261120000002`, x-ingest, cron job 20 (`4-59/5`). No account yet.
+- **Added:** each account's bio, follower count and verified flag (migration `20261120000003_x_profiles.sql`), from
+  the author of its newest post in each actor answer (free: every post carries its author's profile), kept current
+  on every poll, shown by `list_x_accounts`, `get_my_x_accounts` and `add_x_account`. **Why:** stored rather than
+  left to the model to look up: X profile pages show fetchers a login wall, clients differ in web access, and a
+  model's memory of a bio can be stale (it was, here, for Bilello's).
 
 ## Open
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one

@@ -43,7 +43,16 @@ export type XItem = {
   quotedTweetPermalink?: string | null
   media?: { type?: string; mediaUrl?: string }[] | null
   entities?: { urls?: { expanded_url?: string; expandedUrl?: string }[] } | null
-  author?: { id?: string; username?: string; name?: string } | null
+  author?: {
+    id?: string
+    username?: string
+    name?: string
+    description?: string | null
+    followers?: number | null
+    verified?: boolean
+    isBlueVerified?: boolean
+    isVerified?: boolean
+  } | null
 }
 
 export type XPostRow = {
@@ -165,14 +174,30 @@ async function markFailed(supabase: SupabaseClient, usernames: string[], msg: st
   }
 }
 
-/** Saves the X user id and display name the posts carry (once known they rarely change). */
+/** The account fields a post's author carries; only those present, so a record without a bio doesn't erase it. */
+export function authorProfile(a: NonNullable<XItem['author']>) {
+  const desc = a.description?.trim()
+  return {
+    ...(a.id ? { x_user_id: a.id } : {}),
+    ...(a.name ? { name: a.name } : {}),
+    ...(desc !== undefined ? { description: desc || null } : {}),
+    ...(typeof a.followers === 'number' ? { followers: a.followers } : {}),
+    ...(a.verified !== undefined || a.isVerified !== undefined || a.isBlueVerified !== undefined
+      ? { verified: !!(a.verified || a.isVerified || a.isBlueVerified) }
+      : {}),
+  }
+}
+
+/** Saves each account's id, name, bio, followers and verified flag from its newest post in the answer. */
 async function saveAuthors(supabase: SupabaseClient, items: XItem[]) {
-  const seen = new Map<string, { x_user_id: string | null; name: string | null }>()
+  const seen = new Map<string, ReturnType<typeof authorProfile>>()
   for (const it of items) {
     const u = it.author?.username?.toLowerCase()
-    if (u && !seen.has(u)) seen.set(u, { x_user_id: it.author?.id ?? null, name: it.author?.name ?? null })
+    if (u && !seen.has(u)) seen.set(u, authorProfile(it.author!))
   }
-  for (const [username, a] of seen) await supabase.from('x_accounts').update(a).eq('username', username)
+  for (const [username, a] of seen) {
+    if (Object.keys(a).length) await supabase.from('x_accounts').update(a).eq('username', username)
+  }
 }
 
 export type PollSummary = { accounts: number; new_posts: number; backfilled: BackfillResult[]; error?: string }

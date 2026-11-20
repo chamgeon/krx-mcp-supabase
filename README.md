@@ -55,7 +55,7 @@ news for why a stock moved.
 | `get_youtube_transcript(video, from_seconds?, max_chars?, query?)` | A transcript one part at a time (~6,000 characters, `[m:ss]` each minute, `next_from_seconds` for the next part), or only the passages around `query` |
 | `add_x_account(account)` | Starts collecting an X account (@handle or link): its latest 20 posts now (a few seconds), then new ones every 5 min; reposts left out. Up to 20 accounts |
 | `get_my_x_accounts()` / `update_my_x_accounts(add?, remove?)` | X accounts the user follows (their default feed); follows / unfollows them |
-| `list_x_accounts()` | Collected X accounts with post counts, latest post and poll status |
+| `list_x_accounts()` | Collected X accounts: name, bio, followers, verified, profile link, post counts, latest post and poll status |
 | `get_x_feed(account?, query?, days?, limit?)` | Recent posts from the user's accounts (or all), newest first (default 30, at most 100, within 3 days by default): text, quoted post, chart image links, views, likes, link; `query` keeps posts with every word. The answer stays ≤ 64 KB (~90 English posts, ~40–50 Korean) and says how many it left out |
 
 ### `screen_stocks`

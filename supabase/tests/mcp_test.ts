@@ -639,7 +639,7 @@ test('YouTube preferences: follow by title, scope of list_youtube_videos, unfoll
 const XA = 'mcpxtest'
 async function withX(fn: () => Promise<void>) {
   await admin.from('x_accounts').delete().eq('username', XA)
-  const a = await admin.from('x_accounts').insert({ username: XA, name: 'MCP X Test', last_polled_at: new Date().toISOString() })
+  const a = await admin.from('x_accounts').insert({ username: XA, name: 'MCP X Test', description: 'Markets in charts', followers: 875737, verified: true, last_polled_at: new Date().toISOString() })
   if (a.error) throw new Error(a.error.message)
   const ago = (h: number) => new Date(Date.now() - h * 3600_000).toISOString()
   const p = await admin.from('x_posts').insert([
@@ -676,10 +676,10 @@ test('X accounts: list, follow an existing account (no fetch), feed scope, unfol
   await withX(async () => {
     const all = await call('list_x_accounts')
     const row = all.find((a: Json) => a.account === `@${XA}`)
-    assertEquals([row.name, row.posts, row.active, row.link], ['MCP X Test', 3, true, `https://x.com/${XA}`])
+    assertEquals([row.name, row.bio, row.followers, row.verified, row.posts, row.active, row.link], ['MCP X Test', 'Markets in charts', 875737, true, 3, true, `https://x.com/${XA}`])
 
     const added = await call('add_x_account', { account: `https://x.com/${XA}` })
-    assertEquals(added.status, 'already collected')
+    assertEquals([added.status, added.bio, added.followers], ['already collected', 'Markets in charts', 875737])
     assertEquals(added.latest_posts.length, 3)
     assert((await call('add_x_account', { account: 'not a handle!' })).error.includes('not an X handle'))
 
