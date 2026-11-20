@@ -183,7 +183,10 @@ test('tools/list: exactly the expected tools, each described', async () => {
     'add_telegram_channel', 'analyze_stock', 'check_available_dates', 'find_stock', 'find_us_stock', 'get_daily_movers',
     'get_my_channels', 'get_stock_history', 'get_telegram_feed', 'list_telegram_channels', 'list_telegram_events',
     'screen_stocks', 'search_telegram', 'set_my_channels', 'update_my_channels',
-  ])
+    'add_youtube_channel', 'get_my_youtube_channels', 'get_youtube_transcript', 'list_youtube_channels', 'list_youtube_videos',
+    'update_my_youtube_channels',
+    'add_x_account', 'get_my_x_accounts', 'get_x_feed', 'list_x_accounts', 'update_my_x_accounts',
+  ].sort())
   for (const t of tools) {
     assert((t.description ?? '').length > 20, `${t.name} has no real description`)
     assertEquals(t.inputSchema.type, 'object', `${t.name} input schema`)
@@ -533,6 +536,166 @@ test('channel preferences: set, update, feed scope', async () => {
     await call('set_my_channels', { channels: [] }, me)
     await me.close()
   }
+})
+
+// ---- YouTube tools (seeded here: no test reaches YouTube or Apify) ----------------------------------
+
+const YT = 'UCmcptesttesttesttest123'
+const ytHoursAgo = (h: number) => new Date(Date.now() - h * 3600_000).toISOString()
+// 10 minutes, a segment every 10 s (~25 characters each): ~1,500 characters in all
+const ytSegments = Array.from({ length: 60 }, (_, i) => ({ start: i * 10, duration: 9.5, text: `${i}번째 문장 ${i === 42 ? '엔트로픽 상장' : '시황 정리'}입니다` }))
+
+async function withYoutube(fn: () => Promise<void>) {
+  await admin.from('youtube_channels').delete().eq('channel_id', YT)
+  const c = await admin.from('youtube_channels').insert({ channel_id: YT, title: '테스트 유튜브' })
+  if (c.error) throw new Error(c.error.message)
+  const v = await admin.from('youtube_videos').insert([
+    {
+      video_id: 'ytMcpTest01', channel_id: YT, title: '오늘의 시황', description: '설명', published_at: ytHoursAgo(1),
+      duration_seconds: 600, transcript_status: 'ok', transcript_lang: 'ko', transcript_auto: true, segments: ytSegments,
+      transcript: ytSegments.map((x) => x.text).join(' '),
+    },
+    {
+      video_id: 'ytMcpTest02', channel_id: YT, title: '라이브 예정', description: '', published_at: ytHoursAgo(0.5),
+      duration_seconds: null, transcript_status: 'pending', transcript_lang: null, transcript_auto: null, segments: null, transcript: null,
+    },
+  ])
+  if (v.error) throw new Error(v.error.message)
+  try {
+    await fn()
+  } finally {
+    await admin.from('youtube_channels').delete().eq('channel_id', YT) // videos and follows go with it
+  }
+}
+
+test('get_youtube_transcript: parts with next_from_seconds until the end; query returns excerpts; not ready says so', async () => {
+  await withYoutube(async () => {
+    const p1 = await call('get_youtube_transcript', { video: 'https://youtu.be/ytMcpTest01', max_chars: 1000 })
+    assertEquals([p1.video_id, p1.channel, p1.auto_generated, p1.language], ['ytMcpTest01', '테스트 유튜브', true, 'ko'])
+    assert(p1.text.length <= 1000 && p1.text.startsWith('[0:00] 0번째 문장'), p1.text.slice(0, 40))
+    assert(typeof p1.next_from_seconds === 'number' && !p1.end, JSON.stringify(p1).slice(0, 300))
+    const p2 = await call('get_youtube_transcript', { video: 'ytMcpTest01', from_seconds: p1.next_from_seconds, max_chars: 1000 })
+    assertEquals(p2.end, true)
+    assert(p2.text.includes('59번째 문장') && !p2.text.includes('[0:00]'), p2.text.slice(0, 40))
+
+    const q = await call('get_youtube_transcript', { video: 'ytMcpTest01', query: '엔트 로픽' })
+    assertEquals(q.matches.length, 1)
+    assertEquals([q.matches[0].time, q.matches[0].link], ['7:00', 'https://www.youtube.com/watch?v=ytMcpTest01&t=420s'])
+    assertEquals(q.text, undefined)
+
+    const pending = await call('get_youtube_transcript', { video: 'ytMcpTest02' })
+    assertEquals(pending.transcript, 'pending')
+    assert(pending.note.includes('not available yet'))
+    assert((await call('get_youtube_transcript', { video: 'zzzzzzzzzzz' })).error.includes('not collected'))
+  })
+})
+
+test('list_youtube_videos: only videos with a transcript (the others counted); query finds the passage', async () => {
+  await withYoutube(async () => {
+    const all = await call('list_youtube_videos', { channel: '테스트 유튜브' })
+    assertEquals(all.scope, 'one channel')
+    assertEquals(all.videos.map((v: Json) => v.video_id), ['ytMcpTest01'])
+    assertEquals(all.videos[0].length, '10:00')
+    assert(all.waiting_for_transcript.startsWith('1 video in this period is'), all.waiting_for_transcript)
+    const hit = await call('list_youtube_videos', { channel: '테스트 유튜브', query: '엔트로픽' })
+    assertEquals(hit.videos.map((v: Json) => v.video_id), ['ytMcpTest01'])
+    assertEquals(hit.videos[0].matches[0].time, '7:00')
+    assert((await call('list_youtube_videos', { channel: 'no such channel title' })).error.includes('not a YouTube channel'))
+  })
+})
+
+test('list_youtube_channels: every collected channel with transcript and waiting counts, and poll state', async () => {
+  await withYoutube(async () => {
+    const rows = await call('list_youtube_channels')
+    const t = rows.find((c: Json) => c.channel_id === YT)
+    assertEquals([t.channel, t.videos_with_transcript, t.waiting_for_transcript, t.active], ['테스트 유튜브', 1, 1, true])
+    assertEquals(t.link, `https://www.youtube.com/channel/${YT}`)
+  })
+})
+
+test('YouTube preferences: follow by title, scope of list_youtube_videos, unfollow', async () => {
+  await withYoutube(async () => {
+    const { token } = await testUser()
+    const me = await connect({ token })
+    try {
+      const upd = await call('update_my_youtube_channels', { add: ['테스트 유튜브'] }, me)
+      assertEquals(upd.channels.map((c: Json) => c.channel_id), [YT])
+      assertEquals([upd.channels[0].videos_with_transcript, upd.channels[0].waiting_for_transcript], [1, 1])
+      assertEquals((await call('get_my_youtube_channels', {}, me)).channels.map((c: Json) => c.channel), ['테스트 유튜브'])
+      assertEquals((await call('list_youtube_videos', {}, me)).scope, 'channels you follow')
+      const off = await call('update_my_youtube_channels', { remove: [YT] }, me)
+      assertEquals([off.channels, off.unfollowed], [[], [YT]])
+      assertEquals((await call('get_my_youtube_channels', {}, me)).channels, [])
+      // the shared key has no user: preferences aren't available, reading is
+      assert((await call('update_my_youtube_channels', { add: [YT] })).error.includes('no user account'))
+    } finally {
+      await me.close()
+    }
+  })
+})
+
+// ---- X tools (seeded here: no test reaches X or Apify) --------------------------------------------
+
+const XA = 'mcpxtest'
+async function withX(fn: () => Promise<void>) {
+  await admin.from('x_accounts').delete().eq('username', XA)
+  const a = await admin.from('x_accounts').insert({ username: XA, name: 'MCP X Test', last_polled_at: new Date().toISOString() })
+  if (a.error) throw new Error(a.error.message)
+  const ago = (h: number) => new Date(Date.now() - h * 3600_000).toISOString()
+  const p = await admin.from('x_posts').insert([
+    { id: '1000000000000000001', username: XA, ts: ago(1), text: 'The S&P 500 fell 2% today', url: `https://x.com/${XA}/status/1000000000000000001`,
+      media: ['https://pbs.twimg.com/media/chart.png'], views: 15004, likes: 80, links: [], is_reply: false, quoted_text: null, quoted_url: null },
+    { id: '1000000000000000002', username: XA, ts: ago(2), text: 'History often rhymes', url: `https://x.com/${XA}/status/1000000000000000002`,
+      media: [], views: null, likes: 5, links: [], is_reply: true, quoted_text: 'Silver prices tripled', quoted_url: 'https://x.com/a/status/9' },
+    { id: '1000000000000000003', username: XA, ts: ago(24 * 10), text: 'an old post', url: `https://x.com/${XA}/status/1000000000000000003`,
+      media: [], views: null, likes: null, links: [], is_reply: false, quoted_text: null, quoted_url: null },
+  ])
+  if (p.error) throw new Error(p.error.message)
+  try {
+    await fn()
+  } finally {
+    await admin.from('x_accounts').delete().eq('username', XA)
+  }
+}
+
+test('get_x_feed: one account, newest first, within days; quotes and chart images; query needs every word', async () => {
+  await withX(async () => {
+    const f = await call('get_x_feed', { account: `@${XA}` })
+    assertEquals([f.scope, f.count], ['one account', 2]) // the 10-day-old post is outside the default 3 days
+    assertEquals(f.posts.map((p: Json) => p.text), ['The S&P 500 fell 2% today', 'History often rhymes'])
+    assertEquals([f.posts[0].images, f.posts[0].views, f.posts[0].account], [['https://pbs.twimg.com/media/chart.png'], 15004, `@${XA}`])
+    assertEquals([f.posts[1].reply, f.posts[1].quoting.text], [true, 'Silver prices tripled'])
+    assertEquals((await call('get_x_feed', { account: XA, days: 30 })).count, 3)
+    assertEquals((await call('get_x_feed', { account: XA, query: 's&p FELL' })).posts.map((p: Json) => p.link), [`https://x.com/${XA}/status/1000000000000000001`])
+    assertEquals((await call('get_x_feed', { account: XA, query: 'fell rhymes' })).count, 0)
+    assert((await call('get_x_feed', { account: '@notcollected' })).error.includes('not collected'))
+  })
+})
+
+test('X accounts: list, follow an existing account (no fetch), feed scope, unfollow', async () => {
+  await withX(async () => {
+    const all = await call('list_x_accounts')
+    const row = all.find((a: Json) => a.account === `@${XA}`)
+    assertEquals([row.name, row.posts, row.active, row.link], ['MCP X Test', 3, true, `https://x.com/${XA}`])
+
+    const added = await call('add_x_account', { account: `https://x.com/${XA}` })
+    assertEquals(added.status, 'already collected')
+    assertEquals(added.latest_posts.length, 3)
+    assert((await call('add_x_account', { account: 'not a handle!' })).error.includes('not an X handle'))
+
+    const { token } = await testUser()
+    const me = await connect({ token })
+    try {
+      const upd = await call('update_my_x_accounts', { add: [`@${XA}`] }, me)
+      assertEquals([upd.accounts.map((a: Json) => a.account), upd.followed], [[`@${XA}`], [`@${XA}`]])
+      assertEquals((await call('get_x_feed', {}, me)).scope, 'accounts you follow')
+      const off = await call('update_my_x_accounts', { remove: [XA] }, me)
+      assertEquals([off.accounts, off.unfollowed], [[], [`@${XA}`]])
+      assertEquals((await call('get_my_x_accounts', {}, me)).accounts, [])
+    } finally {
+      await me.close()
+    }
+  })
 })
 
 // ---- usage logging --------------------------------------------------------------------------------

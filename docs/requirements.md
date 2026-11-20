@@ -62,6 +62,24 @@ column points at the test that proves it, or is empty where none exists yet.
 | FR-TG-9 | M | Feed and search filter by US ticker (`us_stock`) and event (`event`); posts list `us_stocks` and `events`; `find_us_stock` looks up a ticker or English name; `list_telegram_events` lists the events. | mcp_test: same, and "find_us_stock: by ticker and by English name; list_telegram_events" |
 | FR-TG-6 | M | While a channel's older posts are still being collected, `get_telegram_feed` and `search_telegram` say so (`still_collecting`, with the time collected from) when the requested window starts before that time, and only then. | mcp_test: "feed and search say when a channel is still filling" |
 
+### YouTube tools
+
+| ID | P | Requirement | Acceptance test |
+|---|---|---|---|
+| FR-YT-1 | M | `add_youtube_channel` takes an @handle, a channel link or a `UC…` id, checks the channel's feed, stores its newest 5 videos, and follows it for the user; at most 20 channels are collected. | `_shared/youtube_test.ts` ("resolveChannel"); checked once on the local stack with @futuresnow |
+| FR-YT-2 | M | A user's followed YouTube channels are theirs alone and are the default scope of `list_youtube_videos` (all channels when they follow none). | mcp_test: "YouTube preferences: follow by title, scope of list_youtube_videos, unfollow" |
+| FR-YT-5 | M | `list_youtube_videos` lists only videos with a transcript and counts the ones still waiting; `list_youtube_channels` lists every collected channel with those counts and its poll state. | mcp_test: "list_youtube_videos: only videos with a transcript …", "list_youtube_channels: …" |
+| FR-YT-3 | M | `get_youtube_transcript` never returns more than one part (default ~6,000 characters, at most 15,000), cut at a segment, with `[m:ss]` markers and `next_from_seconds` until the end; with `query` only the excerpts and their times. A video without a transcript says why. | mcp_test: "get_youtube_transcript: parts …"; `_shared/youtube_test.ts` ("transcriptPart", "transcriptMatches") |
+| FR-YT-4 | M | `youtube-ingest` stores a new channel's newest 5 videos and then every new upload (no Shorts), fetches transcripts in the channel's language, retries a missing one (15 min … 8 h) and gives up 48 h after publishing; a failed feed or transcript call fails the run. | db_test: "pollChannel …", "transcriptBatch …"; `_shared/youtube_test.ts` |
+
+### X tools
+
+| ID | P | Requirement | Acceptance test |
+|---|---|---|---|
+| FR-X-1 | M | `add_x_account` fetches a new account's latest 20 posts (reposts left out) and follows it; an account with no posts is refused and not kept; at most 20 accounts. | `_shared/x_test.ts`; checked on the local stack with @charliebilello (20 posts, 6 s) |
+| FR-X-2 | M | `x-ingest` asks for every account's posts since its last poll (minus 10 minutes) in one actor run; a failed run leaves the poll point unchanged, so no post is skipped. | db_test: "pollAccounts: …" |
+| FR-X-3 | M | `get_x_feed` returns posts from the user's accounts (or all), newest first, with quoted text and image links, filtered by account, days and every word of `query`; the answer as sent stays ≤ 64 KB, keeping as many of the newest posts as fit and saying how many it left out. | mcp_test: "get_x_feed: …", "X accounts: …"; `mcp/x_test.ts` (fitPosts) |
+
 ### Data pipeline
 
 | ID | P | Requirement | Acceptance test |
@@ -162,7 +180,7 @@ Responses go into an LLM's context window, so size is a cost and a quality issue
 | ID | P | Requirement | Baseline (all time) | Status |
 |---|---|---|---|---|
 | SIZE-1 | S | Response p95 ≤ 20 KB per tool | max p95: feed 16 KB, movers 14 KB; history since 11-19: 20 days ~4 KB, the 120-day maximum 22 KB | ❔ history: p95 over real calls since 11-19 |
-| SIZE-2 | M | No response > 64 KB; larger results are truncated and say so | history max 22 KB since 11-19 (`days` up to 120; was 66 KB at 250) | ✅ |
+| SIZE-2 | M | No response > 64 KB; larger results are truncated and say so (YouTube: a transcript part ≤ 15,000 characters, ~45 KB; `list_youtube_videos` stops at ~48 KB) | history max 22 KB since 11-19 (`days` up to 120; was 66 KB at 250) | ✅ |
 
 ### 2.5 Reliability
 

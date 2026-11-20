@@ -47,6 +47,16 @@ news for why a stock moved.
 | `get_my_channels()` | Channels the logged-in user follows (their default feed) |
 | `set_my_channels(channels)` | Replaces the user's followed channels; collects new ones first |
 | `update_my_channels(add?, remove?)` | Follows / unfollows channels |
+| `add_youtube_channel(channel)` | Starts collecting a YouTube channel (@handle, link or `UC…` id): its newest 5 videos now, every new upload after; transcripts follow within ~10 min. Up to 20 channels |
+| `get_my_youtube_channels()` | YouTube channels the user follows, with transcript counts and the latest video |
+| `list_youtube_channels()` | Collected YouTube channels with videos with a transcript, videos still waiting for one, the latest video and poll status |
+| `update_my_youtube_channels(add?, remove?)` | Follows / unfollows YouTube channels (titles of collected channels work too) |
+| `list_youtube_videos(channel?, query?, days?, limit?)` | Recent videos **with a transcript** from the user's channels (or all), newest first (videos still waiting are only counted); with `query`, only videos that mention it, with timed excerpts |
+| `get_youtube_transcript(video, from_seconds?, max_chars?, query?)` | A transcript one part at a time (~6,000 characters, `[m:ss]` each minute, `next_from_seconds` for the next part), or only the passages around `query` |
+| `add_x_account(account)` | Starts collecting an X account (@handle or link): its latest 20 posts now (a few seconds), then new ones every 5 min; reposts left out. Up to 20 accounts |
+| `get_my_x_accounts()` / `update_my_x_accounts(add?, remove?)` | X accounts the user follows (their default feed); follows / unfollows them |
+| `list_x_accounts()` | Collected X accounts with post counts, latest post and poll status |
+| `get_x_feed(account?, query?, days?, limit?)` | Recent posts from the user's accounts (or all), newest first (default 30, at most 100, within 3 days by default): text, quoted post, chart image links, views, likes, link; `query` keeps posts with every word. The answer stays ≤ 64 KB (~90 English posts, ~40–50 Korean) and says how many it left out |
 
 ### `screen_stocks`
 
@@ -252,6 +262,18 @@ update youtube_videos set transcript_status = 'pending', next_attempt_at = now()
 update youtube_channels set active = false where channel_id = '<UC…>';
 ```
 
+#### X (Twitter) posts
+
+`x-ingest` collects posts from X accounts through the Apify actor `xquik/x-tweet-scraper` (same `APIFY_API_KEY`):
+~$0.15 per 1,000 posts plus ~$0.00007 a run, one run every 5 minutes for all accounts (~$0.55 a month, then the
+posts). A new account gets its latest 20 posts once; after that each run asks for posts since the last poll.
+Reposts are left out in the actor (not paid for); posts, quotes and the author's replies are kept, with image URLs.
+Accounts are added with the `add_x_account` tool, or by hand (the next run backfills them):
+
+```sql
+insert into x_accounts (username) values ('charliebilello');
+```
+
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided to Edge Functions automatically.
 
 ### 4. Deploy the functions
@@ -261,6 +283,7 @@ supabase functions deploy kis-ingest
 supabase functions deploy krx-ingest
 supabase functions deploy telegram-ingest
 supabase functions deploy youtube-ingest
+supabase functions deploy x-ingest
 supabase functions deploy mcp
 supabase functions deploy pipeline-report
 ```

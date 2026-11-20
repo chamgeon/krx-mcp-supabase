@@ -17,3 +17,6 @@ verify_jwt = false
 
 [functions.youtube-ingest]
 verify_jwt = false
+
+[functions.x-ingest]
+verify_jwt = false

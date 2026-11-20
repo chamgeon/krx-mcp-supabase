@@ -844,7 +844,7 @@ What was done and why. Oldest first; new entries go at the bottom.
 - Also today: `us_symbols` refreshed early (its `updated_at` set back a day) to pick up ANT, listed 11-19; ANT added
   to `us_tickers` of the 94 posts tagged `anthropic-ipo` by hand, without re-gating them.
 
-## 2026-11-20 — YouTube transcripts (built, not deployed)
+## 2026-11-20 — YouTube transcripts (deployed the same day)
 - **Decided:** transcripts from Apify (`apihq/youtube-transcript-scraper`), new uploads from each channel's RSS feed.
   **Why:** YouTube's official captions API only serves a video's owner, and its caption files refuse cloud IPs (the
   libraries' own docs, and reports from November); the RSS feed answers from Supabase (checked from ap-south-1:
@@ -861,6 +861,47 @@ What was done and why. Oldest first; new entries go at the bottom.
 - Channels (by id): 기릿의 주식노트 `UCw8pcmyPWGSik7bjJpeINlA`, 박종훈의 지식한방 `UCOB62fKRT7b73X7tRxMuN2g`, 오선의 미국
   증시 라이브 `UC_JJ_NhRqPKcIOj5Ko3W_3w`, 시황맨TV `UCRCNBeNS8MrOwFV6h6Yjemw` (found by name in YouTube search).
 - Auto-generated Korean captions get names wrong (엔트로픽, "SO" for S-Oil), so the gate's name check matters more here.
+
+## 2026-11-20 — YouTube MCP tools (built, not deployed)
+- **Done:** `add_youtube_channel`, `get_my_youtube_channels`, `update_my_youtube_channels`, `list_youtube_videos`,
+  `get_youtube_transcript` (mcp/youtube.ts), and `user_youtube_channels` + `youtube_channels.added_by` + a trigram index
+  on transcripts (migration `20261120000001`). An @handle is resolved from the channel's page (it loads from Mumbai:
+  checked with two handles), a new channel's feed is checked and polled at once (newest 5 videos; youtube-ingest
+  fetches their transcripts). At most 20 channels, since each video costs a transcript.
+- **Long transcripts:** in production 기릿 averages 4.7k characters, 시황맨 8.5k, 박종훈 11.7k, and 오선's live streams
+  82k (up to 202k for a ~10-hour stream). MCP clients cap an answer (Claude Code warns at ~10k tokens and cuts at
+  25k), and SIZE-1/2 cap ours (20 KB p95, 64 KB; Korean is 3 bytes a character), so `get_youtube_transcript` returns
+  one part at a time: ~6,000 characters by default (≈18 KB), at most 15,000, cut at a segment, a `[m:ss]` marker each
+  minute, and `next_from_seconds` for the next part; `query` returns only the passages around a phrase (spacing
+  ignored, since auto-captions space Korean loosely) with their times and a link to that second.
+  `list_youtube_videos` stops at ~48 KB and says how many it left out.
+- Tests: unit (resolveChannel, transcriptPart covers every segment once across parts, transcriptMatches), MCP
+  (paging to the end, query, pending note, title lookup, follow/unfollow scope).
+- **Changed:** `list_youtube_videos` lists only videos with a transcript (a video without one has nothing to read
+  yet) and counts the ones still waiting; `list_youtube_channels` lists every collected channel (counts, poll state),
+  like `list_telegram_channels`, and `get_my_youtube_channels` now lists only the user's own.
+
+## 2026-11-20 — X posts through Apify (built, not deployed)
+- **Decided:** `xquik/x-tweet-scraper` on Apify. **Why:** X's own API is pay-per-use only (~$0.005 a post read). Of
+  the Apify actors that work on the free plan (tested live on @KobeissiLetter: apidojo/tweet-scraper $0.40, kaitoeasyapi
+  $0.25 and xquik $0.15 per 1,000), xquik is the cheapest and fastest (2 s), takes many handles in one run, and
+  filters by time and post type in the actor, so retweets aren't paid for. An empty run costs ~$0.00007.
+- **Done:** `x_accounts`, `x_posts`, `user_x_accounts` (migration `20261120000002_x.sql`), `x-ingest` every 5 minutes
+  (offset 4 minutes from telegram-ingest), and the tools `add_x_account`, `get_my_x_accounts`, `update_my_x_accounts`,
+  `list_x_accounts`, `get_x_feed`. A new account gets its latest 20 posts once; then one run for all accounts asks
+  for posts since the oldest last poll minus 10 minutes (posts are upserted by id, so the overlap only refreshes
+  counts). Posts keep the quoted post's text and image URLs (Bilello's posts are mostly charts: 13 of 20).
+- **Found while testing:** a failed run moved `last_polled_at` forward, which would have skipped the posts between
+  the last success and the failure (the next run asks from it); now a failure only records the error. And an
+  answer with the same post twice failed the whole save (an upsert can't take one row twice); posts are now
+  de-duplicated by id first.
+- Checked on the local stack: `add_x_account @charliebilello` stored 20 posts (no retweets; 3 quotes, 3 replies,
+  13 with images) in 6 s for $0.0032; two polls after it found nothing new, $0.000065 each.
+- Cost of a poll doesn't grow with accounts: an empty run for 4 accounts cost the same as for 1 ($0.0000644 vs
+  $0.0000643), so polling is ~$0.56 a month in all, plus the posts.
+- `get_x_feed` keeps its answer, as sent, ≤ 64 KB (SIZE-2), as many of the newest posts as fit (~90 of Bilello's,
+  ~530 bytes each), and says how many it left out.
+- Not gated yet (no noise label or stock tags on X posts).
 
 ## Open
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
@@ -900,7 +941,9 @@ What was done and why. Oldest first; new entries go at the bottom.
   (snippet around the query word), but only matches one spelling (앤스로픽 or Anthropic-only posts drop out). Kept
   as-is for now. Open: how to split (the formatting differs a lot by channel: headings, bullets, prose), and what the
   feed counts (posts or chunks).
-- YouTube, to deploy: `supabase db push --remote`, `supabase secrets set APIFY_API_KEY=…`, deploy youtube-ingest,
-  insert the four channels (README → YouTube transcripts), schedule the `youtube-ingest` job. Then: gate the
-  transcripts (label, stock and event tags, as for Telegram posts; a transcript is ~2–8k characters, a live stream
-  much more), MCP tools to read them, and a YouTube line in the daily report.
+- YouTube: ingest deployed 11-20 (4 channels, job 19 every 5 min; first run 15:12 KST, 20 videos). Next: gate the
+  transcripts (label, stock and event tags, as for Telegram posts; a live stream's 80k+ characters needs chunks or
+  a summary first), and a YouTube line in the daily report. MCP tools: deploy `mcp` after `supabase db push --remote`
+  (migration 20261120000001).
+- X: deploy (`supabase db push --remote`, deploy x-ingest and mcp, schedule the `x-ingest` job, add @charliebilello),
+  then gate the posts like Telegram's.

@@ -243,3 +243,93 @@ export async function transcriptBatch(supabase: SupabaseClient, source: Transcri
   if (errors.length) sum.error = `transcripts: ${errors.join('; ')}`
   return sum
 }
+
+// ---- Channels people add (mcp: add_youtube_channel) ----
+
+/**
+ * A channel id from what people paste: a channel id (UC…), a youtube.com/channel/UC… link, or an @handle (or its
+ * youtube.com/@handle link), which is looked up on the channel's page (its canonical link names the channel id; the
+ * page loads from Supabase's regions, checked 2026-11-20). Null when it isn't one of these, or the handle doesn't exist.
+ */
+export async function resolveChannel(input: string, fetcher: typeof fetch = fetch): Promise<string | null> {
+  const s = input.trim()
+  const id = s.match(/(?:^|\/channel\/)(UC[A-Za-z0-9_-]{22})(?:$|[/?#])/)
+  if (id) return id[1]
+  const handle = s.match(/^(?:https?:\/\/)?(?:(?:www|m)\.)?(?:youtube\.com\/)?@([^/?#\s]+)/)
+  if (!handle) return null
+  const res = await fetcher(`https://www.youtube.com/@${encodeURIComponent(decodeURIComponent(handle[1]))}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Accept-Language': 'ko,en;q=0.8' },
+  })
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`youtube.com/@${handle[1]}: HTTP ${res.status}`)
+  const html = await res.text()
+  return html.match(/<link rel="canonical" href="https:\/\/www\.youtube\.com\/channel\/(UC[A-Za-z0-9_-]{22})"/)?.[1] ??
+    html.match(/"channelId":"(UC[A-Za-z0-9_-]{22})"/)?.[1] ?? null
+}
+
+// ---- Reading transcripts in parts (mcp: get_youtube_transcript) ----
+// A transcript runs ~500 characters a minute: 2–8k for a 5–15 minute video, 60k+ for a two-hour live stream. MCP
+// clients cap a tool's answer (Claude Code warns above ~10k tokens and cuts at 25k; others are similar or stricter),
+// so the tool returns one part at a time, cut at a segment, and says where the next one starts.
+
+export type Segment = { start: number; duration: number; text: string }
+
+/** 75 → "1:15", 3725 → "1:02:05" */
+export function clock(seconds: number): string {
+  const t = Math.max(0, Math.floor(seconds))
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`
+}
+
+const segText = (s: Segment) => s.text.replace(/\s+/g, ' ').trim()
+
+/**
+ * The part of a transcript from `fromSeconds`, at most `maxChars` (at least one segment), with a [m:ss] marker at
+ * each new minute so an answer can point into the video. `next_from` is where the next part starts (null at the end).
+ */
+export function transcriptPart(segments: Segment[], fromSeconds: number, maxChars: number) {
+  const segs = segments.filter((s) => segText(s))
+  const first = segs.findIndex((s) => s.start >= fromSeconds - 1e-6)
+  if (first < 0) return { text: '', from: null, to: null, next_from: null }
+  let text = ''
+  let minute = -1
+  let i = first
+  for (; i < segs.length; i++) {
+    const m = Math.floor(segs[i].start / 60)
+    const piece = (m !== minute ? `${text ? '\n' : ''}[${clock(segs[i].start)}] ` : ' ') + segText(segs[i])
+    if (text && text.length + piece.length > maxChars) break
+    text += piece
+    minute = m
+  }
+  const last = segs[i - 1]
+  return { text, from: segs[first].start, to: last.start + last.duration, next_from: i < segs.length ? segs[i].start : null }
+}
+
+/**
+ * Where a word or phrase comes up in a transcript: up to `max` excerpts of about ±`around` characters, with the time
+ * each starts at. Spaces are optional between the query's characters (auto-captions space Korean words loosely).
+ */
+export function transcriptMatches(segments: Segment[], query: string, max = 8, around = 160) {
+  const q = query.replace(/\s+/g, '')
+  if (!q) return []
+  const segs = segments.filter((s) => segText(s))
+  const starts: number[] = [] // character offset of each segment in the joined text
+  let joined = ''
+  for (const s of segs) {
+    starts.push(joined.length + (joined ? 1 : 0))
+    joined += (joined ? ' ' : '') + segText(s)
+  }
+  const re = new RegExp([...q].map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*'), 'gi')
+  const out: { at: number; time: string; excerpt: string }[] = []
+  let lastEnd = -1
+  for (const m of joined.matchAll(re)) {
+    if (m.index! < lastEnd) continue // inside the previous excerpt
+    const from = Math.max(0, m.index! - around), to = Math.min(joined.length, m.index! + m[0].length + around)
+    let k = 0
+    while (k + 1 < starts.length && starts[k + 1] <= m.index!) k++
+    out.push({ at: segs[k].start, time: clock(segs[k].start), excerpt: (from ? '…' : '') + joined.slice(from, to) + (to < joined.length ? '…' : '') })
+    lastEnd = to
+    if (out.length >= max) break
+  }
+  return out
+}

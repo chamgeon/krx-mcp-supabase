@@ -887,3 +887,67 @@ Deno.test('transcriptBatch: transcripts saved; missing ones retried or given up 
     assertEquals([by[ytId(3)].transcript_status, by[ytId(4)].transcript_status, by[ytId(5)].attempts], ['none', 'failed', 0])
   })
 })
+
+// ---- X: backfill and polling (fake actor) ----
+
+import { pollAccounts, type XItem, type XRequest } from '../functions/_shared/x.ts'
+
+const X_ACC = 'xtestaccount'
+const xItem = (id: number, minutesAgo: number, over: Partial<XItem> = {}): XItem => ({
+  id: '9' + String(id).padStart(18, '0'),
+  type: 'tweet',
+  text: `post ${id}`,
+  createdAt: new Date(Date.now() - minutesAgo * 60_000).toUTCString(),
+  likeCount: id,
+  author: { id: '42', username: 'XTestAccount', name: 'X Test' },
+  ...over,
+})
+
+// pollAccounts polls every active account, so other accounts in the local database are switched off meanwhile
+async function withXAccount(fn: () => Promise<void>) {
+  await db.from('x_accounts').delete().eq('username', X_ACC)
+  const { data: others } = await db.from('x_accounts').select('username').eq('active', true)
+  const otherNames = (others ?? []).map((a) => a.username)
+  if (otherNames.length) await db.from('x_accounts').update({ active: false }).in('username', otherNames)
+  const { error } = await db.from('x_accounts').insert({ username: X_ACC })
+  if (error) throw new Error(error.message)
+  try {
+    await fn()
+  } finally {
+    await db.from('x_accounts').delete().eq('username', X_ACC) // posts go with it
+    if (otherNames.length) await db.from('x_accounts').update({ active: true }).in('username', otherNames)
+  }
+}
+const xPosts = async () => (await db.from('x_posts').select('*').eq('username', X_ACC).order('ts', { ascending: false })).data ?? []
+const xAccount = async () => (await db.from('x_accounts').select('*').eq('username', X_ACC).single()).data!
+
+Deno.test('pollAccounts: a new account is backfilled; later polls ask from the last poll; a failed run changes nothing', async () => {
+  await withXAccount(async () => {
+    const asked: XRequest[] = []
+    let answer: XItem[] = [xItem(1, 60), xItem(2, 30, { isRetweet: true }), xItem(3, 10, { author: { username: 'someoneelse' } })]
+    const source = (req: XRequest) => (asked.push(req), Promise.resolve(answer))
+
+    const s1 = await pollAccounts(db, source)
+    assertEquals([asked.length, asked[0].handles, asked[0].perAccount, asked[0].sinceTime], [1, [X_ACC], 20, undefined])
+    assertEquals([s1.new_posts, s1.backfilled.map((b) => [b.account, b.ok, b.posts])], [1, [[X_ACC, true, 1]]])
+    let acc = await xAccount()
+    assertEquals([acc.name, acc.x_user_id, acc.last_error, !!acc.last_polled_at], ['X Test', '42', null, true])
+    const polledAt = Date.parse(acc.last_polled_at)
+
+    // next poll: from the last poll minus the overlap; the known post's counts refresh, the new one is added
+    answer = [xItem(1, 60, { likeCount: 99 }), xItem(4, 1)]
+    const s2 = await pollAccounts(db, source)
+    assertEquals([asked[1].handles, asked[1].sinceTime!.getTime(), s2.new_posts], [[X_ACC], polledAt - 10 * 60_000, 1])
+    const posts = await xPosts()
+    assertEquals(posts.map((p) => p.text), ['post 4', 'post 1'])
+    assertEquals(posts[1].likes, 99)
+
+    // the actor fails: the error is reported, the poll time stays (the next run asks from the same point)
+    acc = await xAccount()
+    const s3 = await pollAccounts(db, () => Promise.reject(new Error('apify: HTTP 402: not enough credit')))
+    assertEquals(s3.error, 'x: apify: HTTP 402: not enough credit')
+    const after = await xAccount()
+    assertEquals([after.poll_errors, after.last_error], [1, 'apify: HTTP 402: not enough credit'])
+    assertEquals(after.last_polled_at, acc.last_polled_at) // moving it would skip the posts since the last success
+  })
+})

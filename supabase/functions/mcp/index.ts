@@ -26,6 +26,8 @@ import {
   type StoredToken,
 } from '../_shared/kis.ts'
 import { registerTelegramTools } from './telegram.ts'
+import { registerYoutubeTools } from './youtube.ts'
+import { registerXTools } from './x.ts'
 import { early, type Step, step, timeCall } from './timing.ts'
 import {
   arrivalHeaders,
@@ -692,6 +694,8 @@ const handler = createMcpHandler((ctx) => {
   )
 
   registerTelegramTools(server, supabase, caller.userId)
+  registerYoutubeTools(server, supabase, caller.userId)
+  registerXTools(server, supabase, caller.userId)
 
   return server
 })
