@@ -79,7 +79,22 @@ Deno.test('the output schema only allows the listed events', () => {
   assertEquals(outputSchema([{ id: 'anthropic-ipo', description: 'x' }]).properties.events, {
     type: 'array', items: { type: 'string', enum: ['anthropic-ipo'] },
   })
-  assertEquals(outputSchema([]).properties.events, { type: 'array', items: { type: 'string' }, maxItems: 0 })
+  // No events (a post older than every event window): no events field, rather than an empty-array constraint
+  const none = outputSchema([])
+  assertEquals('events' in none.properties, false)
+  assertEquals(none.required, ['label', 'companies'])
+})
+
+Deno.test('the output schema uses only keywords structured outputs accept', () => {
+  // Rejected with a 400 ("For 'array' type, property 'maxItems' is not supported"), log 2026-11-20
+  const unsupported = ['maxItems', 'minLength', 'maxLength', 'minimum', 'maximum', 'multipleOf', 'pattern']
+  const walk = (v: unknown, path: string): string[] =>
+    v && typeof v === 'object'
+      ? Object.entries(v).flatMap(([k, x]) => [...(unsupported.includes(k) ? [`${path}.${k}`] : []), ...walk(x, `${path}.${k}`)])
+      : []
+  for (const events of [[], [{ id: 'anthropic-ipo', description: 'x' }]]) {
+    assertEquals(walk(outputSchema(events), 'schema'), [], `${events.length} events`)
+  }
 })
 
 Deno.test('parseSymbolFile: both files, without ETFs and test issues', () => {

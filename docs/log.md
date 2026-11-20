@@ -821,6 +821,26 @@ What was done and why. Oldest first; new entries go at the bottom.
   notice, so 16 of 20 posts parsed blank and `pageProblems` refused the page. Tested inline and with the real page
   (fixtures/tme_s_stockbot.html, gitignored).
 - **Result:** @stockbot added in production: "Trade Watcher", 160 posts back to 11-08 (8 backfill pages), 1 blank.
+- **Checked:** the parser against two live pages of each of the 10 collected channels (377 posts): every text in a
+  post's bubble was compared with the parsed text, Telegram's UI left out. All 377 posts parsed, the posts' own text
+  fully. The `media_supported_cont` case isn't stockbot-only: insidertracking 69790 ("금일 … 주요 일정 / 특이사항
+  없음") was stored blank and labeled noise.
+- **Done:** `parsePage` also keeps a link preview's site name and description (`[site · title]`, then the
+  description; the title alone before) and a poll's question and options (`[poll] …`, `- option`). Left out on
+  purpose: quoted replies (another post's text), poll percentages (they change with every vote, and a changed text
+  re-gates the post), file sizes and "Anonymous Poll". After that, only those were missing (35 pieces, 4 posts).
+  Deployed (telegram-ingest, mcp).
+- **Done:** recovered posts stored blank before the fix. The 151 posts with empty text were re-read (40 preview
+  pages, fetched from the operator's machine in Korea and parsed with the new parser): 50 had text (44 insidertracking, 5 durov, 1
+  itechkorea poll; 30 of them photos with a caption), all 50 labeled noise. Their text was set where still empty
+  (49; one had been fixed by a poll after the deploy), which re-gates them. The other 101 are media only. Re-gated:
+  44 market, 6 noise.
+- **Fixed:** the gate failed (alert 12:55) on 11 durov posts from 08-03 to 10-11: older than every event window, so
+  `outputSchema` sent `events` as an array with `maxItems: 0`, which structured outputs reject (400 "For 'array' type,
+  property 'maxItems' is not supported"). It had never been sent before: those posts were blank, and a blank post is
+  labeled noise without a call; the parser fix gave them text. Now a post with no events gets no `events` field at
+  all (askGate reads a missing one as none), and gate_test checks the schema for keywords structured outputs reject.
+  Deployed (telegram-ingest).
 - Also today: `us_symbols` refreshed early (its `updated_at` set back a day) to pick up ANT, listed 11-19; ANT added
   to `us_tickers` of the 94 posts tagged `anthropic-ipo` by hand, without re-gating them.
 

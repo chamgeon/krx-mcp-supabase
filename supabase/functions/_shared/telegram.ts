@@ -156,12 +156,31 @@ export function parsePage(html: string, channel: string): TgPage {
       }
       text = (textEl.textContent ?? '').replace(/ /g, ' ').replace(/[ \t]+\n/g, '\n').trim()
     }
-    // Link previews and documents carry useful titles even when the post itself has little text
-    const extra = [
-      el.querySelector('.link_preview_title')?.textContent,
-      el.querySelector('.tgme_widget_message_document_title')?.textContent,
-    ].filter((t): t is string => !!t?.trim())
-    if (extra.length) text = [text, ...extra.map((t) => `[${t.trim()}]`)].filter(Boolean).join('\n')
+    // Text outside the post's own text block, appended in brackets: a link preview (site · title, then its
+    // description), a document's title, a poll (question and options). Left out on purpose: a quoted reply (another
+    // post's text), poll percentages (they change with every vote, and a changed text re-gates the post), file sizes
+    // and "Anonymous Poll" (UI). Checked against every collected channel's live pages (log 2026-11-20).
+    // deno-lint-ignore no-explicit-any
+    const textOf = (root: any, sel: string): string =>
+      ((root?.querySelector(sel)?.textContent ?? '') as string).replace(/ /g, ' ').replace(/\s+/g, ' ').trim()
+    const extra: string[] = []
+    const preview = el.querySelector('.tgme_widget_message_link_preview')
+    if (preview) {
+      const head = [textOf(preview, '.link_preview_site_name'), textOf(preview, '.link_preview_title')].filter(Boolean).join(' · ')
+      const desc = textOf(preview, '.link_preview_description')
+      if (head || desc) extra.push([head && `[${head}]`, desc].filter(Boolean).join('\n'))
+    }
+    const doc = textOf(el, '.tgme_widget_message_document_title')
+    if (doc) extra.push(`[${doc}]`)
+    const poll = el.querySelector('.tgme_widget_message_poll')
+    if (poll) {
+      // deno-lint-ignore no-explicit-any
+      const options = [...poll.querySelectorAll('.tgme_widget_message_poll_option_text')].map((o: any) =>
+        `- ${(o.textContent ?? '').replace(/\s+/g, ' ').trim()}`
+      )
+      extra.push([`[poll] ${textOf(poll, '.tgme_widget_message_poll_question')}`, ...options].join('\n'))
+    }
+    if (extra.length) text = [text, ...extra].filter(Boolean).join('\n')
 
     const ts = el.querySelector('.tgme_widget_message_date time')?.getAttribute('datetime')
     if (!ts) continue

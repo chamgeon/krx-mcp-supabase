@@ -195,7 +195,9 @@ export function outputSchema(events: GateEvent[]) {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['label', 'companies', 'events'],
+    // No events to choose from (a post older than every event window): no events field at all. Structured outputs
+    // reject array constraints such as maxItems (log 2026-11-20); askGate reads a missing events as none.
+    required: events.length ? ['label', 'companies', 'events'] : ['label', 'companies'],
     properties: {
       label: { type: 'string', enum: ['market', 'noise'] },
       companies: {
@@ -212,9 +214,7 @@ export function outputSchema(events: GateEvent[]) {
           },
         },
       },
-      events: events.length
-        ? { type: 'array', items: { type: 'string', enum: events.map((e) => e.id) } }
-        : { type: 'array', items: { type: 'string' }, maxItems: 0 },
+      ...(events.length ? { events: { type: 'array', items: { type: 'string', enum: events.map((e) => e.id) } } } : {}),
     },
   }
 }

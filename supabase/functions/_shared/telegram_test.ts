@@ -106,6 +106,42 @@ Deno.test('parsePage: text of a post the preview can\'t fully show (media_suppor
   assertEquals(b.has_media, false)
 })
 
+// Link preview and poll, trimmed from t.me/s/buysellhunter and t.me/s/itechkorea (2026-11-20)
+const PREVIEW_AND_POLL = `<html><body>
+<div class="tgme_widget_message" data-post="stocknews/201"><div class="tgme_widget_message_bubble">
+  <div class="tgme_widget_message_text"><a href="https://m.blog.naver.com/x/1">https://m.blog.naver.com/x/1</a></div>
+  <a class="tgme_widget_message_link_preview" href="https://m.blog.naver.com/x/1">
+    <div class="link_preview_site_name">NAVER</div>
+    <div class="link_preview_title">엔비디아 &quot;전면재검토&quot;</div>
+    <div class="link_preview_description">젠슨 황이 떠난   자리 ...</div>
+  </a>
+  <span class="tgme_widget_message_meta"><a class="tgme_widget_message_date"><time datetime="2026-11-18T06:01:54+00:00"></time></a></span>
+</div></div>
+<div class="tgme_widget_message" data-post="stocknews/202"><div class="tgme_widget_message_bubble">
+  <div class="tgme_widget_message_poll">
+    <div class="tgme_widget_message_poll_question">가장 큰 이슈는?</div>
+    <div class="tgme_widget_message_poll_type">Anonymous Poll</div>
+    <a class="tgme_widget_message_poll_options">
+      <div class="tgme_widget_message_poll_option"><div class="tgme_widget_message_poll_option_percent">13%</div>
+        <div class="tgme_widget_message_poll_option_value"><div class="tgme_widget_message_poll_option_text">CPI 예상 초과</div></div></div>
+      <div class="tgme_widget_message_poll_option"><div class="tgme_widget_message_poll_option_percent">80%</div>
+        <div class="tgme_widget_message_poll_option_value"><div class="tgme_widget_message_poll_option_text">엔비디아 급락</div></div></div>
+    </a>
+  </div>
+  <span class="tgme_widget_message_meta"><a class="tgme_widget_message_date"><time datetime="2026-11-19T06:00:00+00:00"></time></a></span>
+</div></div>
+</body></html>`
+
+Deno.test('parsePage: a link preview adds [site · title] and its description', () => {
+  const [p] = parsePage(PREVIEW_AND_POLL, 'stocknews').posts
+  assertEquals(p.text, 'https://m.blog.naver.com/x/1\n[NAVER · 엔비디아 "전면재검토"]\n젠슨 황이 떠난 자리 ...')
+})
+
+Deno.test('parsePage: a poll adds its question and options, not the percentages (they change with every vote)', () => {
+  const p = parsePage(PREVIEW_AND_POLL, 'stocknews').posts[1]
+  assertEquals(p.text, '[poll] 가장 큰 이슈는?\n- CPI 예상 초과\n- 엔비디아 급락')
+})
+
 // ---- real preview page --------------------------------------------------------------------------------
 // t.me/s/ehdwl as served on 2026-11-16 (fixtures/, saved by `deno task fixtures telegram ehdwl`), tagged with the real
 // stock list of 2026-11-13 (the KRX fixtures).
