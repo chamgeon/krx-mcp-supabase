@@ -40,3 +40,14 @@ Deno.test('kstTime', () => {
   assertEquals(kstTime(new Date('2026-11-17T06:40:00Z')), '11-17 15:40')
   assertEquals(kstTime(new Date('2026-11-17T15:30:00Z')), '11-18 00:30') // after midnight KST
 })
+
+Deno.test('errorOf: a Telegram poll that stopped early is named first', () => {
+  assertEquals(
+    errorOf({
+      results: [{ channel: 'a', ok: false, error: 'no answer in 10 s' }, { channel: 'b', ok: false, error: 'no answer in 10 s' }],
+      poll_stopped: 't.me unreachable: 2 channels in a row gave no answer',
+      not_polled: ['c'],
+    }),
+    't.me unreachable: 2 channels in a row gave no answer; a: no answer in 10 s; b: no answer in 10 s',
+  )
+})

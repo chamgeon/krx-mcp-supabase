@@ -919,6 +919,50 @@ What was done and why. Oldest first; new entries go at the bottom.
 - Not checked yet on real posts with the real model (tests use a fake Claude): after deploy, spot-check a run's
   labels and tags.
 
+## 2026-11-20 — Thesis tracking designed (docs/plan.md → Phase 4)
+- **Decided (design only):** keep market theses (claim, starting evidence, verification conditions, links to events /
+  KR codes / US tickers) and their review history, and serve "what's new for this thesis" as data: tagged posts,
+  transcript passages, prices, and computed facts about its conditions. The calling LLM does the review (in a chat or
+  its client's scheduled task) and records its verdict with `record_thesis_review`. Events tie it in: the gate's tags
+  already say which new posts are evidence for a thesis.
+- **Corrected the same day:** the first draft had the server review theses itself (Opus 5.5 at 17:00, a Telegram
+  digest). Wrong role: this is an MCP server, its job is the data; judging is the caller's. At most it advises
+  (tool descriptions, an MCP prompt). So no server-side model, no digest, and no exception to "no insight features".
+- Decided: users add events through a tool (`add_event`: at most 30 days back, a few a day per user, `added_by`
+  kept; events stay shared, since the gate tags everyone's posts with them); theses and reviews are private to
+  their user.
+
+## 2026-11-21 — Telegram page fetches: timeout and one retry (deployed: telegram-ingest, mcp)
+- Two failed telegram-ingest runs overnight, each one channel: itechkorea at 03:20 KST and ehdwl at 05:50, both
+  `connection error: connection reset` from t.me's IPv6 address. Each channel worked again on the next run (5 min
+  later). But the 03:20 run took 117 s (p50 over 2 days ~18 s): the connection hung ~95 s before the reset, close to
+  the 150 s wall-clock limit, where the gate and the ingest_runs row would have been lost too.
+- `directPage` (../supabase/functions/_shared/telegram.ts) now gives each attempt a 10 s timeout and retries a network
+  error or timeout once, after 1 s. An HTTP answer (429, 5xx, a redirect) is not retried. Worst case per channel ~21 s
+  instead of unbounded. The relay (mcp's page fetches) goes through the same function, so it gets this too.
+- Why 10 s (first deployed with 15 s, lowered the same day): over 864 runs (3 days) a channel's poll takes p50 ~1.0 s,
+  p99 ~2.4 s (fetch and DB writes, from run time minus gate time per channel polled); a single fetch ~2 s. 10 s is ~4×
+  the p99, and four stuck channels (~84 s) still fit in the 150 s limit; at 15 s, four (~124 s) would not.
+- Watch for `connection reset` / `no answer in 10 s` in `ingest_runs.summary->'results'`.
+
+## 2026-11-21 — Telegram unreachable for a whole run: the poll loop stops early (built, not deployed)
+- The 15:35 KST run was killed at the 150 s limit (`ingest_runs` 1959: no summary). The gateway logs show why: from
+  15:35:03 every channel took ~21.2 s (10 s timeout, 1 s pause, 10 s timeout, then the error path's poll_errors
+  update), six channels in a row, and the limit hit during the 7th (tnbfolio). Telegram didn't answer from Seoul for
+  those ~2.5 minutes; the 15:40 run was normal (32 s). Nothing was stored or gated, and no alert listed the channels.
+- My 10 s reasoning in the morning entry was wrong where it mattered: "four stuck channels fit" assumed failures are
+  per channel. When t.me itself is down every channel stalls, so 10 channels × ~21 s ≈ 212 s, at any timeout above
+  ~6 s. The fix belongs in the loop, not the timeout.
+- `telegram-ingest/polling.ts`: polling stops after 2 channels in a row with no answer at all (`PageNetworkError`,
+  marked `unreachable` in the channel result; a broken page or an HTTP status doesn't count), so such a run ends
+  after ~43 s. No channel starts after 60 s from the run's start (normal: all 10 in ~15 s). Channels not polled are
+  left as they are and come first next run (oldest `last_polled_at` first).
+- The run then reports `poll_stopped` and `not_polled`, returns 500, and alerts once (the hourly whole-run alert;
+  per-channel "started failing" alerts are skipped for an outage). `errorOf` names the stop first. Stalled
+  backfills are skipped after a stop or past the deadline, and the gate starts no call after 110 s from the run's
+  start (`gateBatch`'s new `stopAt`; before, its 100 s deadline counted from the gate's own start).
+- Not covered: one channel whose catch-up fetches 5 slow pages that each answer just under 10 s (~50 s); then a
+  started channel can end near 110 s. Rare (a gap and a slow t.me at once).
 ## Open
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
   next to the database, every minute) vs. moving the project to us-east-1. A ping every minute would keep workers
@@ -963,3 +1007,4 @@ What was done and why. Oldest first; new entries go at the bottom.
   (migration 20261120000001).
 - X: deployed with 4 accounts (Bilello, Bespoke, SentimenTrader, Liz Ann Sonders). Gate: deploy migration
   `20261120000004`, x-ingest and mcp, then check the first gated posts.
+- Thesis tracking (plan.md → Phase 4): build 4.1 (tables, thesis tools, `add_event`).

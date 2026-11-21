@@ -62,14 +62,48 @@ export type PageSource = (channel: string, before?: number) => Promise<RawPage>
 
 const previewUrl = (channel: string, before?: number) => `https://t.me/s/${channel}${before ? `?before=${before}` : ''}`
 
-/** Fetches a preview page from here. A redirect (no preview) comes back as its 3xx status, not followed. */
+// t.me sometimes resets a connection, or holds it open for a minute and a half first (2026-11-21: itechkorea at 03:20
+// KST, a 117 s run against a p50 of ~18 s; ehdwl at 05:50), and the next run works. So each attempt has a timeout,
+// and a network error (not an HTTP answer) is tried once more after a short pause. 10 s: a healthy channel takes
+// ~1 s (p99 ~2.4 s, fetch and DB writes, 3 days of runs), so a stuck channel costs at most ~21 s. When Telegram is
+// unreachable for every channel at once (15:35 the same day: 6 channels × 21 s, then the 150 s limit), that's
+// telegram-ingest's poll loop to stop (../telegram-ingest/polling.ts), not this timeout's.
+export const PAGE_TIMEOUT_MS = 10_000
+export const PAGE_ATTEMPTS = 2
+const RETRY_PAUSE_MS = 1_000
+
+/** t.me gave no HTTP answer (connection error or timeout) on every attempt. */
+export class PageNetworkError extends Error {
+  override name = 'PageNetworkError'
+}
+
+/**
+ * Fetches a preview page from here. A redirect (no preview) comes back as its 3xx status, not followed. A network
+ * error or timeout is retried (PAGE_ATTEMPTS in all), then thrown as a PageNetworkError; an HTTP status is returned
+ * as it is.
+ */
 export const directPage: PageSource = async (channel, before) => {
-  const res = await fetch(previewUrl(channel, before), {
-    headers: { 'User-Agent': UA, 'Accept-Language': 'ko,en;q=0.8' },
-    redirect: 'manual',
-  })
-  const html = await res.text()
-  return { status: res.status, html: res.ok ? html : '' }
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const res = await fetch(previewUrl(channel, before), {
+        headers: { 'User-Agent': UA, 'Accept-Language': 'ko,en;q=0.8' },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
+      })
+      const html = await res.text()
+      return { status: res.status, html: res.ok ? html : '' }
+    } catch (e) {
+      if (attempt >= PAGE_ATTEMPTS) {
+        const err = e as Error
+        throw new PageNetworkError(
+          err.name === 'TimeoutError'
+            ? `t.me/s/${channel}: no answer in ${PAGE_TIMEOUT_MS / 1000} s (${PAGE_ATTEMPTS} attempts)`
+            : err.message,
+        )
+      }
+      await sleep(RETRY_PAUSE_MS)
+    }
+  }
 }
 
 /**
@@ -208,6 +242,7 @@ export type SyncResult = {
   new_posts: number
   pages: number
   error?: string
+  unreachable?: boolean // failed because t.me gave no answer at all (PageNetworkError), not a page problem
   backfill_pending?: boolean // a first sync stopped at maxPages before sinceTs: backfillChannel fetches the rest
 }
 
@@ -310,7 +345,8 @@ export async function syncChannel(
       last_error: msg.slice(0, 500),
       poll_errors: (cur?.poll_errors ?? 0) + 1,
     }).eq('username', channel)
-    return { channel, ok: false, new_posts: newPosts, pages, error: msg }
+    const unreachable = e instanceof PageNetworkError
+    return { channel, ok: false, new_posts: newPosts, pages, error: msg, ...(unreachable ? { unreachable } : {}) }
   }
 }
 

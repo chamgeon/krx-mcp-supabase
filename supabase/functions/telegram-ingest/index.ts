@@ -17,7 +17,8 @@
 // The cron sends x-region: ap-northeast-2, so runs (and the relay) fetch from Seoul (log 2026-11-20).
 //
 // Channels that keep failing (e.g. the owner turned the preview off) are retried at most hourly. Returns 500 when any
-// channel fails, so failures show up in the function logs.
+// channel fails, so failures show up in the function logs. Polling stops early when t.me is unreachable or at a
+// deadline (./polling.ts), and the gate stops starting calls at GATE_STOP_MS, so a run ends inside the 150 s limit.
 //
 // After polling, it resumes backfills that stalled: a new channel's older posts are fetched in the background by the
 // MCP function, and if that worker ended midway (no progress for 3 minutes), the backfill continues here from its
@@ -32,12 +33,13 @@
 import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import {
-  backfillChannel, type BackfillResult, BACKFILL_STALE_MS, channelName, directPage, syncChannel, type SyncResult,
+  backfillChannel, type BackfillResult, BACKFILL_STALE_MS, channelName, directPage, syncChannel,
 } from '../_shared/telegram.ts'
 import { monitored, sendTelegram } from '../_shared/ops.ts'
 import Anthropic from 'npm:@anthropic-ai/sdk@1.5.0'
 import { channelAlerts } from './alerts.ts'
 import { GATE_MAX, gateBatch, type GateSummary, refreshUsSymbols } from './gating.ts'
+import { pollChannels, POLL_DEADLINE_MS } from './polling.ts'
 
 const INGEST_SECRET = Deno.env.get('INGEST_SECRET')!
 const HERE_REGION = Deno.env.get('SB_REGION') || null // set by Supabase; unset locally
@@ -51,16 +53,18 @@ const supabase = createClient(
 
 const CHANNEL_PAUSE_MS = 300
 const FAILING_RETRY_MS = 3600_000
+const GATE_STOP_MS = 110_000 // from the run's start: no new gate call after this (a call takes ~6 s)
 
 // Every run is recorded in ingest_runs (../_shared/ops.ts). Channel failures alert only when a channel starts failing or
 // works again (./alerts.ts); a failure of the whole run (no per-channel results), or of the whole gate step, gets the
-// usual hourly alert.
+// usual hourly alert, and so does a poll that stopped early (Telegram unreachable, or the deadline).
 const wholeRunFailed = (body: unknown) => {
-  const b = body as { results?: unknown; gate?: { error?: string } } | null
-  return !Array.isArray(b?.results) || typeof b?.gate?.error === 'string'
+  const b = body as { results?: unknown; gate?: { error?: string }; poll_stopped?: string } | null
+  return !Array.isArray(b?.results) || typeof b?.gate?.error === 'string' || typeof b?.poll_stopped === 'string'
 }
 
 const ingest = monitored('telegram-ingest', supabase, async (req) => {
+  const runStart = Date.now()
   if (req.headers.get('x-ingest-secret') !== INGEST_SECRET) {
     return new Response('unauthorized', { status: 401 })
   }
@@ -85,14 +89,17 @@ const ingest = monitored('telegram-ingest', supabase, async (req) => {
     only || c.poll_errors < 3 || !c.last_polled_at || now - new Date(c.last_polled_at).getTime() > FAILING_RETRY_MS
   )
 
-  const results: SyncResult[] = []
-  for (const c of due) {
-    if (results.length) await new Promise((r) => setTimeout(r, CHANNEL_PAUSE_MS))
-    results.push(await syncChannel(supabase, c.username))
-  }
+  const { results, not_polled, stopped } = await pollChannels(
+    due.map((c) => c.username),
+    (channel) => syncChannel(supabase, channel),
+    { deadline: runStart + POLL_DEADLINE_MS, pauseMs: CHANNEL_PAUSE_MS },
+  )
 
-  const alert = channelAlerts(new Map(due.map((c) => [c.username, c.poll_errors])), results)
-  if (alert) await sendTelegram(alert)
+  // When Telegram is unreachable the run's own alert says so once; per-channel "started failing" would be noise
+  if (stopped?.reason !== 'unreachable') {
+    const alert = channelAlerts(new Map(due.map((c) => [c.username, c.poll_errors])), results)
+    if (alert) await sendTelegram(alert)
+  }
 
   // Stalled backfills, for channels whose poll works (a failing channel's backfill would fail the same way)
   const stale = new Date(Date.now() - BACKFILL_STALE_MS).toISOString()
@@ -102,7 +109,8 @@ const ingest = monitored('telegram-ingest', supabase, async (req) => {
   const { data: stalled, error: bErr } = await bq
   if (bErr) return Response.json({ error: bErr.message, results }, { status: 500 })
   const backfills: BackfillResult[] = []
-  for (const c of stalled ?? []) {
+  for (const c of stopped ? [] : stalled ?? []) {
+    if (Date.now() >= runStart + POLL_DEADLINE_MS) break
     await new Promise((r) => setTimeout(r, CHANNEL_PAUSE_MS))
     backfills.push(await backfillChannel(supabase, c.username, { resume: true }))
   }
@@ -117,7 +125,7 @@ const ingest = monitored('telegram-ingest', supabase, async (req) => {
       symbols = { error: (e as Error).message } // the stored list stays in use
     }
     try {
-      gate = await gateBatch(supabase, anthropic)
+      gate = await gateBatch(supabase, anthropic, undefined, undefined, runStart + GATE_STOP_MS)
     } catch (e) {
       gate = { error: `gate: ${(e as Error).message}` }
     }
@@ -131,11 +139,12 @@ const ingest = monitored('telegram-ingest', supabase, async (req) => {
       skipped: (channels?.length ?? 0) - due.length,
       new_posts: results.reduce((n, r) => n + r.new_posts, 0),
       results,
+      ...(stopped ? { poll_stopped: stopped.message, not_polled } : {}),
       ...(backfills.length ? { backfills } : {}),
       ...(gate ? { gate } : {}),
       ...(symbols && (symbols as { refreshed?: boolean }).refreshed !== false ? { us_symbols: symbols } : {}),
     },
-    { status: failed.length || (gate && 'error' in gate && gate.error) ? 500 : 200 },
+    { status: failed.length || stopped || (gate && 'error' in gate && gate.error) ? 500 : 200 },
   )
 }, { alertOn: wholeRunFailed })
 

@@ -3,7 +3,7 @@
 
 import { assertEquals, assertRejects } from 'jsr:@std/assert@1.0.19'
 import {
-  channelName, directPage, fetchPage, pageProblems, type PageSource, parsePage, relayPages, setPageSource,
+  channelName, directPage, fetchPage, PageNetworkError, pageProblems, type PageSource, parsePage, relayPages, setPageSource,
 } from './telegram.ts'
 
 Deno.test('channelName normalizes the ways people paste a channel', () => {
@@ -294,4 +294,36 @@ Deno.test('relayPages: Telegram\'s redirect passes through; a failed relay falls
     const raw = await withFetch(failing as typeof fetch, () => relay('stocknews'))
     assertEquals(raw.html, 'from here')
   }
+})
+
+Deno.test('directPage: a network error is tried once more; an HTTP answer is not retried', async () => {
+  let calls = 0
+  const flaky = (async () => {
+    if (++calls === 1) throw new TypeError('client error (SendRequest): connection error: connection reset')
+    return new Response(ONE_POST, { status: 200 })
+  }) as typeof fetch
+  const raw = await withFetch(flaky, () => directPage('stocknews'))
+  assertEquals([calls, raw.status, raw.html], [2, 200, ONE_POST])
+
+  calls = 0
+  const busy = (async () => (calls++, new Response('slow down', { status: 429 }))) as typeof fetch
+  assertEquals((await withFetch(busy, () => directPage('stocknews'))).status, 429)
+  assertEquals(calls, 1)
+})
+
+Deno.test('directPage: gives up after the second network error; a timeout says so', async () => {
+  let calls = 0
+  const reset = (async () => { calls++; throw new TypeError('connection reset') }) as typeof fetch
+  await assertRejects(() => withFetch(reset, () => directPage('stocknews')), PageNetworkError, 'connection reset')
+  assertEquals(calls, 2)
+
+  const hung = (async () => { throw new DOMException('Signal timed out.', 'TimeoutError') }) as typeof fetch
+  await assertRejects(() => withFetch(hung, () => directPage('stocknews')), PageNetworkError, 't.me/s/stocknews: no answer in 10 s (2 attempts)')
+})
+
+Deno.test('directPage: each attempt has a timeout signal', async () => {
+  let signal: AbortSignal | null | undefined
+  const stub = (async (_url: string, init?: RequestInit) => (signal = init?.signal, new Response(ONE_POST))) as typeof fetch
+  await withFetch(stub, () => directPage('stocknews'))
+  assertEquals(signal instanceof AbortSignal, true)
 })

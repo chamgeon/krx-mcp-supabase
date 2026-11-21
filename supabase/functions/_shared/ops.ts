@@ -52,7 +52,9 @@ export function errorOf(body: unknown): string | null {
   if (typeof b.error === 'string') return b.error // kis-ingest: { error }
   const out: string[] = []
   if (Array.isArray(b.results)) {
-    // telegram-ingest: { results: [{ channel, ok, error }] }
+    // telegram-ingest: a poll that stopped early (Telegram unreachable, the deadline) first: { poll_stopped }
+    if (typeof b.poll_stopped === 'string') out.push(b.poll_stopped)
+    // and its per-channel results: { results: [{ channel, ok, error }] }
     for (const r of b.results as { channel?: string; ok?: boolean; error?: string }[]) {
       if (r?.ok === false) out.push(`${r.channel ?? '?'}: ${r.error ?? 'failed'}`)
     }

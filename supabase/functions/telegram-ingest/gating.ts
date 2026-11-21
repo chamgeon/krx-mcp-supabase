@@ -137,8 +137,12 @@ export const X_POSTS: GateTarget = {
 }
 
 /** Gates up to `limit` of the newest ungated posts (Telegram's unless another target is given) and writes the results back. */
-export async function gateBatch(supabase: SupabaseClient, client: Anthropic, limit = GATE_BATCH, target = TELEGRAM_POSTS): Promise<GateSummary> {
+/** `stopAt` (epoch ms, optional): the caller's own deadline; no call starts after it or after GATE_DEADLINE_MS. */
+export async function gateBatch(
+  supabase: SupabaseClient, client: Anthropic, limit = GATE_BATCH, target = TELEGRAM_POSTS, stopAt = Infinity,
+): Promise<GateSummary> {
   const t0 = performance.now()
+  const until = Math.min(t0 + GATE_DEADLINE_MS, t0 + (stopAt - Date.now()))
   const sum: GateSummary = { gated: 0, noise: 0, failed: 0, left: null, tokens: { input: 0, output: 0 }, ms: 0 }
   const { data: posts, error } = await supabase.from(target.table)
     .select(target.columns)
@@ -174,7 +178,7 @@ export async function gateBatch(supabase: SupabaseClient, client: Anthropic, lim
         sum.failed++
         if (errors.length < 3) errors.push(`${target.name(p)}: ${(e as Error).message.slice(0, 200)}`)
       }
-    }, t0 + GATE_DEADLINE_MS)
+    }, until)
     if (errors.length) sum.errors = errors
     // Every call failed: not one odd post but the key, the API or the schema. Fails the run, which alerts (hourly).
     if (sum.failed && !sum.gated && sum.failed >= Math.min(3, posts.length)) sum.error = `gate: every call failed: ${errors[0]}`

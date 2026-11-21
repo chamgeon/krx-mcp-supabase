@@ -91,6 +91,104 @@ to hold up).
      no added latency for users. Needs an Anthropic API key as a Supabase secret; CAP-6 ($0/month) no longer holds.
    - Still open: the feed's volume problem for daily readers (the gate removes noise but doesn't rank).
 
+## Phase 3: More sources (2026-11-20, built)
+
+- **YouTube:** channels' new uploads from their RSS feeds, transcripts through Apify (`youtube-ingest`, every 5 min;
+  a new channel's newest 5 videos, then every upload). Tools: add, follow, list channels, list videos with a
+  transcript, read a transcript in parts or by query. Transcripts are not gated yet.
+- **X:** accounts' posts through Apify (`x-ingest`, every 5 min, one run for all accounts; a new account's latest 20
+  posts, reposts left out), with the bio and followers. Gated like Telegram posts (same prompt, name check and
+  events). Tools: add, follow, list accounts, feed with tags and filters.
+- Details and numbers: log 2026-11-20.
+
+## Phase 4: Thesis tracking (design, 2026-11-20; not started)
+
+**Roles.** This server stays a data source. It keeps theses and their review history (a memory the calling model
+doesn't have between chats) and answers "what's new for this thesis" with data. The judging is done by the LLM that
+calls us, in a chat or in its client's scheduled task; it writes its verdict back, and the next review starts from
+it. At most the server advises how to run a review (tool descriptions, an MCP prompt); it never generates a verdict,
+a digest or an opinion itself, and runs no model for it. So the first rule holds: no insight features on our side.
+
+**Goal.** The caller doesn't start from scratch each day: it can read what it (or the user) concluded before, on what
+evidence, how to tell if it was right, and what has come in since.
+
+**Events are the glue.** An event (`telegram_events`) says what a post is *about* (`amd-short-report`); a thesis is a
+*claim* about how it turns out ("the AMD sell-off is overdone; back above $520 by 12-18"). A thesis links to events,
+KR codes and US tickers, the same tags the gate writes on Telegram and X posts, so "new evidence for this thesis" is
+a query over tags already there, with no new search logic.
+
+### 1. Store theses and reviews (schema)
+
+- `theses`, one row per claim, as the caller writes it:
+  - the statement, its direction and horizon, and the date it was made;
+  - the evidence it started from (links to posts, videos, price rows);
+  - verification conditions: what would confirm it, what would refute it, by when; measurable where possible (a
+    price level, an earnings figure, an official statement);
+  - links: `events`, `stock_codes`, `us_tickers`;
+  - status (`active`, `confirmed`, `refuted`, `expired`, `closed`) and confidence, both set by the caller;
+  - owner (`user_id`): private to that user. No tool lists or reads another user's theses (as with followed
+    channels); the operator's `?key=` connection has no user, so it can't add or read any.
+- `thesis_reviews`, one row per review the caller records: verdict (strengthened / weakened / refuted / no change),
+  its reasoning, confidence after, and the evidence it cites (each linked). The server stores it as given; it checks
+  only that cited evidence exists.
+
+### 2. Tools (data in, data out)
+
+- `add_thesis`: stores a thesis as the caller structured it (statement, conditions, links). When no event covers it,
+  the answer says so and suggests `add_event`.
+- `add_event(id, description, active_from)`: any logged-in user adds an event. Adding it re-gates the posts in its
+  window, so earlier evidence gets tagged too (~$0.05 per 1,000 posts). Events stay **shared**, unlike theses: the
+  gate tags everyone's posts with them, and `list_telegram_events` shows them all. Guards, since one user's event
+  costs re-gating and changes tags everyone sees:
+  - `active_from` at most 30 days back (bounds the re-gate);
+  - a few new events per user a day;
+  - no duplicate ids; the answer shows existing events whose description is close, so the caller reuses one;
+  - `added_by` recorded on the event; editing or removing one stays the operator's (an edit re-gates nothing by
+    itself, see 20261119000001).
+- `list_theses`, `get_thesis` (the thesis and its review history).
+- `get_thesis_updates(thesis, since?)`: the data a review needs, since the last recorded review by default:
+  - gated market posts (Telegram, X) with its events, stocks or tickers;
+  - YouTube passages that mention them (transcript search, until transcripts are gated);
+  - KR price moves from `daily_prices` / `live_prices`;
+  - **facts about its conditions**, computed, not judged: "close crossed 520 on 12-02", "deadline 12-18 passed".
+  Size-capped like the feeds (64 KB), with links to everything.
+- `record_thesis_review(thesis, verdict, reasoning, confidence, evidence, status?)`: writes the caller's conclusion,
+  and closes the thesis when the caller says it's confirmed, refuted or expired.
+
+### 3. Daily review: the caller's schedule, our advice
+
+Scheduling belongs to the client: a Claude routine or a ChatGPT scheduled task that says "review my theses" at
+17:00 KST calls `list_theses` → `get_thesis_updates` → `record_thesis_review` for each one. (This answers "can a
+scheduled reminder reach the data?": yes, through the MCP, if the client's scheduled tasks can use connectors; to be
+checked per client.) We help it run well without running it:
+
+- tool descriptions that say what a good review records (cite evidence, compare against the stated conditions, say
+  when nothing changed);
+- an MCP prompt (`review_theses`) with that workflow, for clients that support prompts;
+- `get_thesis_updates` says when there's nothing new, so a scheduled run can skip that thesis cheaply.
+
+No server-side digest: the caller reports to the user in its own channel (chat, its scheduled-task notification).
+
+### 4. Gaps to close (data we don't have yet)
+
+| Gap | Why it matters | Fix |
+|---|---|---|
+| No US prices | US theses can't be checked against price moves, only news | A daily US close for the tickers theses reference |
+| YouTube not gated | Videos carry no event or stock tags; found only by text search | Gate transcripts in chunks (also helps the feed) |
+| No 뉴스·공시·리서치 | Theses only see Telegram, X and YouTube | DART 공시 API first (free, official), news later |
+
+### Order
+
+1. Phase 4.1: tables, `add_thesis`, `list_theses`, `get_thesis`, `record_thesis_review`, `add_event`. ~1 session.
+2. Phase 4.2: `get_thesis_updates` (evidence and condition facts), the `review_theses` prompt, and a check that a
+   scheduled task in Claude (and ChatGPT) can run the review through the MCP. ~1 session.
+3. Then each gap on its own: YouTube gating, DART, US prices.
+
+### Decided (2026-11-20)
+
+1. Users add events through a tool (`add_event`, with the guards above); events stay shared.
+2. Theses and their reviews are private to their user.
+
 ## Backlog (build only on user request)
 
 - Investor flows (수급): foreign, institutional and retail net buying, short selling, margin balance (KIS API)
