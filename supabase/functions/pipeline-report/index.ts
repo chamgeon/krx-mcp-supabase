@@ -31,7 +31,7 @@ Deno.serve(async (req) => {
     const start = new Date(end.getTime() - 86400_000)
     const todayIso = new Date(end.getTime() + 9 * 3600_000).toISOString().slice(0, 10)
 
-    const [runs, pending, latest, channels] = await Promise.all([
+    const [runs, pending, latest, channels, ytPending, ytOldest] = await Promise.all([
       supabase.from('ingest_runs').select('job, started_at, ok, summary, error')
         .gte('started_at', start.toISOString()).lt('started_at', end.toISOString())
         .order('started_at').limit(5000),
@@ -40,8 +40,10 @@ Deno.serve(async (req) => {
       supabase.from('available_dates').select('bas_dd').eq('final', false).lt('bas_dd', todayIso).order('bas_dd'),
       supabase.from('trading_days').select('bas_dd, row_count').order('bas_dd', { ascending: false }).limit(1),
       supabase.from('telegram_channels').select('username, last_error').eq('active', true).gt('poll_errors', 0),
+      supabase.from('youtube_videos').select('video_id', { count: 'exact', head: true }).eq('transcript_status', 'pending'),
+      supabase.from('youtube_videos').select('published_at').eq('transcript_status', 'pending').order('published_at').limit(1),
     ])
-    for (const r of [runs, pending, latest, channels]) if (r.error) throw new Error(r.error.message)
+    for (const r of [runs, pending, latest, channels, ytPending, ytOldest]) if (r.error) throw new Error(r.error.message)
 
     const text = buildReport({
       end,
@@ -49,6 +51,7 @@ Deno.serve(async (req) => {
       pendingKrxDays: (pending.data ?? []).map((d) => d.bas_dd),
       krxLatest: latest.data?.[0] ?? null,
       channelErrors: channels.data ?? [],
+      youtubePending: { count: ytPending.count ?? 0, oldest: ytOldest.data?.[0]?.published_at ?? null },
     })
     const sent = await sendTelegram(text)
 

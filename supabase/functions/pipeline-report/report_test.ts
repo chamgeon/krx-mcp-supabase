@@ -2,7 +2,7 @@
 // Run from the repo root: deno task test
 
 import { assert, assertEquals, assertStringIncludes } from 'jsr:@std/assert@1.0.19'
-import { buildReport, gateReport, marketReport, reportWindowEnd, type Run } from './report.ts'
+import { buildReport, gateReport, marketReport, reportWindowEnd, type Run, youtubeReport } from './report.ts'
 
 const END = new Date('2026-11-17T09:00:00Z') // Tue 18:00 KST
 const at = (kst: string) => new Date(`2026-11-17T${kst}:00+09:00`).toISOString()
@@ -25,9 +25,13 @@ const markets = [
   mk('us', '2026-11-17T05:03:00+09:00', true, { stored: 650 }), mk('us', '2026-11-17T06:58:00+09:00', true, { stored: 651 }),
   mk('global', '2026-11-17T17:50:00+09:00'),
 ]
+const yt = (newVideos: number, t: object = {}, ok = true): Run => ({
+  job: 'youtube-ingest', started_at: at('10:02'), ok, error: ok ? null : 'x',
+  summary: { new_videos: newVideos, transcripts: { fetched: 0, waiting: 0, none: 0, failed: 0, left: 0, ...t } },
+})
 const healthy = {
   end: END,
-  runs: [krx, kis('09:05'), kis('15:40'), kis('16:00'), tg(3), tg(2), ...markets],
+  runs: [krx, kis('09:05'), kis('15:40'), kis('16:00'), tg(3), tg(2), yt(2, { fetched: 1 }), yt(0, { fetched: 1 }), ...markets],
   pendingKrxDays: [],
   krxLatest: { bas_dd: '2026-11-16', row_count: 2789 },
   channelErrors: [],
@@ -44,6 +48,7 @@ Deno.test('a healthy trading day', () => {
     '✅ KIS: 3 snapshots today, last 16:00 (2,771 stocks)',
     '✅ KRX official: latest 11-16 (2,789 stocks), loaded 11-16',
     '✅ Telegram: 2 polls, 5 new posts',
+    '✅ YouTube: 2 polls, 2 new videos, 2 transcripts fetched',
     '✅ Markets: KR 2 runs, last 17:56; KR bonds 18:30; US 2 runs, last 06:58, 651 stocks; gold/silver/BTC 17:50',
     '✅ No failed runs since yesterday 18:00',
   ].join('\n'))
@@ -88,7 +93,19 @@ Deno.test('jobs that never ran are flagged', () => {
   const text = buildReport({ ...healthy, runs: [kis('15:40')] })
   assertStringIncludes(text, "❌ KRX: krx-ingest didn't run (07:00–08:30)")
   assertStringIncludes(text, "❌ Telegram: telegram-ingest didn't run")
+  assertStringIncludes(text, "❌ YouTube: youtube-ingest didn't run")
   assertStringIncludes(text, "❌ Markets: market-ingest-live didn't run; market-ingest-bonds didn't run; market-ingest-us didn't run; market-ingest-global didn't run")
+})
+
+Deno.test('YouTube: videos waiting now, given up or failed, a job that never ran or never succeeded', () => {
+  const runs = [yt(1, { fetched: 1, waiting: 3 }), yt(0, { none: 1 })]
+  assertEquals(
+    youtubeReport(runs, { count: 1, oldest: '2026-11-16T12:14:30Z' }),
+    '⚠️ YouTube: 2 polls, 1 new video, 1 transcript fetched, 1 waiting for captions (oldest uploaded 11-16 21:14); 1 without a transcript after 48 h',
+  )
+  assertEquals(youtubeReport([yt(0, { failed: 2 })]), '⚠️ YouTube: 1 poll, 0 new videos, 0 transcripts fetched; 2 failed')
+  assertEquals(youtubeReport([], { count: 0, oldest: null }), "❌ YouTube: youtube-ingest didn't run")
+  assertEquals(youtubeReport([yt(0, {}, false), yt(0, {}, false)]), '❌ YouTube: no successful run (2 failed runs)')
 })
 
 Deno.test('markets: a set with only failed runs is flagged, the others listed as ok', () => {

@@ -10,7 +10,7 @@ export type Run = {
   ok: boolean | null // null: still running (or stopped and not yet marked; ops.ts sweepKilled marks it within minutes)
   // the function's answer: kis-ingest { date, rows, as_of } | { date, skipped }; krx-ingest { results };
   // telegram-ingest { polled, new_posts, gate?: { gated, noise, failed, left, tokens: { input, output } } | { error } };
-  // market-ingest-us { stored, ... }
+  // market-ingest-us { stored, ... }; youtube-ingest { new_videos, transcripts: { fetched, waiting, none, failed, left } }
   // deno-lint-ignore no-explicit-any
   summary: any
   error: string | null
@@ -22,6 +22,8 @@ export type ReportInput = {
   pendingKrxDays: string[] // days before today with only KIS data: KRX hasn't loaded them (YYYY-MM-DD)
   krxLatest: { bas_dd: string; row_count: number } | null // latest official day
   channelErrors: { username: string; last_error: string | null }[] // active channels currently failing
+  // youtube_videos still waiting for a transcript now, and the oldest one's upload time (null when none)
+  youtubePending?: { count: number; oldest: string | null }
 }
 
 
@@ -30,6 +32,29 @@ const n = (x: number) => x.toLocaleString('en-US')
 const count = (x: number, one: string, many: string) => `${n(x)} ${x === 1 ? one : many}`
 
 const M = (x: number) => (x >= 1e6 ? `${(x / 1e6).toFixed(2)}M` : `${Math.round(x / 1e3)}K`)
+
+/**
+ * youtube-ingest over the window: polls, new videos, transcripts fetched; videos given up on (no transcript 48 h after
+ * upload) or failed; and how many wait for captions now (a live stream's take hours). ✅ normally, ⚠️ with any given
+ * up or failed, ❌ when it didn't run or never succeeded (its failures are also in the failed-runs list).
+ */
+export function youtubeReport(runs: Run[], pending?: { count: number; oldest: string | null }): string {
+  const all = runs.filter((r) => r.job === 'youtube-ingest')
+  const good = all.filter((r) => r.ok)
+  if (!all.length) return "❌ YouTube: youtube-ingest didn't run"
+  if (!good.length) return `❌ YouTube: no successful run (${count(all.length, 'failed run', 'failed runs')})`
+  const sum = (f: (r: Run) => unknown) => good.reduce((s, r) => s + (Number(f(r)) || 0), 0)
+  const videos = sum((r) => r.summary?.new_videos)
+  const fetched = sum((r) => r.summary?.transcripts?.fetched)
+  const none = sum((r) => r.summary?.transcripts?.none)
+  const failed = sum((r) => r.summary?.transcripts?.failed)
+  const waiting = pending?.count
+    ? `, ${n(pending.count)} waiting for captions${pending.oldest ? ` (oldest uploaded ${kstTime(new Date(pending.oldest))})` : ''}`
+    : ''
+  const problems = [none ? `${n(none)} without a transcript after 48 h` : '', failed ? `${n(failed)} failed` : ''].filter(Boolean)
+  return `${problems.length ? '⚠️' : '✅'} YouTube: ${count(good.length, 'poll', 'polls')}, ${count(videos, 'new video', 'new videos')}, ` +
+    `${count(fetched, 'transcript', 'transcripts')} fetched${waiting}${problems.length ? `; ${problems.join(', ')}` : ''}`
+}
 
 /**
  * market-ingest, one job per set, over the window (yesterday 18:00 → today 18:00 KST; `dow` is today's weekday):
@@ -99,7 +124,7 @@ export function reportWindowEnd(now: Date): Date {
   return now < end ? new Date(end.getTime() - 86400_000) : end
 }
 
-export function buildReport({ end, runs, pendingKrxDays, krxLatest, channelErrors }: ReportInput): string {
+export function buildReport({ end, runs, pendingKrxDays, krxLatest, channelErrors, youtubePending }: ReportInput): string {
   const kstEnd = new Date(end.getTime() + 9 * 3600_000)
   const todayIso = kstEnd.toISOString().slice(0, 10)
   const todayYmd = todayIso.replace(/-/g, '')
@@ -165,6 +190,8 @@ export function buildReport({ end, runs, pendingKrxDays, krxLatest, channelError
       }`,
     )
   }
+
+  lines.push(youtubeReport(runs, youtubePending))
 
   const marketLine = marketReport(runs, dow)
   if (marketLine) lines.push(marketLine)

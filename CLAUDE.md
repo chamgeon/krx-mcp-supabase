@@ -18,5 +18,6 @@
 
 ## Docs
 
-- `docs/log.md`: what was done and why, oldest first; open items at the bottom (`## Open`).
+- `docs/log.md`: what was done and why, oldest first; open items at the bottom (`## Open`). Keep it minimal: a few
+  bullets per entry with the decision, the reason and the key numbers, not the investigation steps.
 - `docs/requirements.md`, `docs/plan.md`, README (setup, useful SQL).
