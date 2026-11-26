@@ -531,6 +531,38 @@ test('get_telegram_feed: noise is hidden unless asked for; US ticker and event f
   })
 })
 
+test('get_telegram_feed: with a filter, a chunked digest shows only its parts about it; without one, the post', async () => {
+  const digest = '🌎 브리핑\n• 엔비디아 실적 발표.\n• 유가 상승.\n• 테스트 IPO 흥행.\n' + '기타 소식. '.repeat(250)
+  const { error } = await admin.from('telegram_messages').insert({
+    username: 'testchannel_b', msg_id: 3010, ts: '2026-11-13T05:00:00Z', text: digest, label: 'market',
+    us_tickers: ['NVDA'], events: ['test-ipo'], gate_version: 'v6', gated_at: '2026-11-14T00:00:00Z',
+  })
+  if (error) throw new Error(error.message)
+  // every row names every tag column (a multi-row insert sends null for a column a row leaves out)
+  const chunk = (idx: number, text: string, tags: { us_tickers?: string[]; events?: string[] } = {}) =>
+    ({ username: 'testchannel_b', msg_id: 3010, idx, text, stock_codes: [], us_tickers: [], events: [], ...tags })
+  try {
+    const ch = await admin.from('telegram_chunks').insert([
+      chunk(0, '🌎 브리핑\n• 엔비디아 실적 발표.', { us_tickers: ['NVDA'] }),
+      chunk(1, '• 유가 상승.'),
+      chunk(2, '• 테스트 IPO 흥행.', { events: ['test-ipo'] }),
+    ])
+    if (ch.error) throw new Error(ch.error.message)
+    const us = await call('get_telegram_feed', { all_channels: true, us_stock: 'NVDA', since: '2026-11-01' })
+    const p = us.posts.find((x: Json) => x.link.endsWith('/3010'))
+    assertEquals(p.text, '🌎 브리핑\n• 엔비디아 실적 발표.')
+    assertStringIncludes(us.parts_note, 'only their parts')
+    const ev = await call('get_telegram_feed', { all_channels: true, event: 'test-ipo', since: '2026-11-01' })
+    assertEquals(ev.posts.find((x: Json) => x.link.endsWith('/3010')).text, '• 테스트 IPO 흥행.')
+    // No filter: the post's opening as before, no note
+    const all = await call('get_telegram_feed', { all_channels: true, since: '2026-11-01', max_chars: 300 })
+    const whole = all.posts.find((x: Json) => x.link.endsWith('/3010'))
+    assertEquals([whole.text.length, all.parts_note], [301, undefined]) // 300 characters + '…'
+  } finally {
+    await admin.from('telegram_messages').delete().eq('username', 'testchannel_b').eq('msg_id', 3010) // chunks go with it
+  }
+})
+
 test('search_telegram: hides noise, filters by US ticker', async () => {
   await withGatedPosts(async () => {
     const hbm = await call('search_telegram', { query: 'HBM', since: '2026-11-01' })

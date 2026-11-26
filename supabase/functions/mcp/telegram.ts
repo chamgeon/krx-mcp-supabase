@@ -115,6 +115,28 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     return new Map((data ?? []).map((r) => [r.ticker, r.name.split(' - ')[0].replace(/ (Common|Ordinary|Class [A-Z]|American Depositary).*$/, '')]))
   }
 
+  // A filtered feed's chunked posts: their chunks with the filter's tag, in order, keyed `username/msg_id`. A chunked
+  // post none of whose chunks carries the tag (the post-level tag came from a name no chunk contains) isn't in the map
+  // and is shown as usual.
+  async function matchingChunks(msgs: Msg[], f: { code: string | null; us: string | null; event: string | null }) {
+    const out = new Map<string, string[]>()
+    const ids = [...new Set(msgs.map((m) => m.msg_id))]
+    if (!ids.length) return out
+    let q = supabase.from('telegram_chunks').select('username, msg_id, idx, text').in('msg_id', ids)
+    if (f.code) q = q.contains('stock_codes', [f.code])
+    if (f.us) q = q.contains('us_tickers', [f.us])
+    if (f.event) q = q.contains('events', [f.event])
+    const { data, error } = await step('chunks', q.order('idx'))
+    if (error) throw new Error(error.message)
+    const wanted = new Set(msgs.map((m) => `${m.username}/${m.msg_id}`))
+    for (const c of data ?? []) {
+      const key = `${c.username}/${c.msg_id}`
+      if (!wanted.has(key)) continue // same msg_id in another channel
+      out.set(key, [...(out.get(key) ?? []), c.text])
+    }
+    return out
+  }
+
   async function present(msgs: Msg[], maxChars: number, day: Day, snippetOf?: (m: Msg) => string) {
     const [names, us] = await Promise.all([
       stockNames(msgs.flatMap((m) => m.stock_codes), day),
@@ -426,7 +448,8 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
         'Recent posts from collected public Telegram channels, newest first, with a link to each post, the stocks ' +
         'mentioned (KR: stocks, US: us_stocks) and the events it is about. Posts are labeled as they arrive, and noise ' +
         '(chatter, channel housekeeping, empty posts) is hidden unless include_noise is true. Filter by channel, by KR ' +
-        'stock, by US ticker, by event (list_telegram_events), and by time. Channels are polled ' +
+        'stock, by US ticker, by event (list_telegram_events), and by time; with one of those filters a long digest shows ' +
+        'only its parts about it (parts_note). Channels are polled ' +
         'every 5 minutes. Across several channels the `limit` slots are shared fairly, so one busy channel cannot ' +
         "crowd out the others; with the default window (no `since`), today's posts (KST) come first and earlier days " +
         'fill the rest. `channels` gives each channel\'s shown / today / total posts in the window: pass `channel` ' +
@@ -494,6 +517,8 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       }
       if (res.error) throw new Error(res.error.message)
       const data = (res.data ?? []) as FeedRow[]
+      // With a stock / US / event filter, a long post that was chunked shows only its chunks with that tag
+      const parts = f.code || f.us || f.event ? await matchingChunks(data, f) : new Map<string, string[]>()
       const channels = feedChannels(data)
       const cut = channels.filter((c) => c.shown < c.in_window)
       return json({
@@ -508,7 +533,14 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
           }
           : {}),
         ...withCollecting(pending),
-        posts: await present(data, max_chars, day),
+        ...(parts.size
+          ? { parts_note: 'Long posts (digests) show only their parts about the filter, separated by "…"; the link opens the whole post.' }
+          : {}),
+        posts: await present(data, max_chars, day, parts.size ? (m) => {
+          const p = parts.get(`${m.username}/${m.msg_id}`)
+          const text = p ? p.join('\n…\n') : m.text
+          return text.length > max_chars ? text.slice(0, max_chars) + '…' : text
+        } : undefined),
       })
     },
   )

@@ -740,8 +740,43 @@ Deno.test({
         const sum = await gateBatch(db, client, 10)
         assertEquals([sum.gated, sum.noise, sum.failed, sum.left, calls.length], [2, 1, 0, 0, 1])
         const p = await getPost(2007)
-        assertEquals([p.label, p.stock_codes, p.us_tickers, p.events, p.gate_version], ['market', ['900001'], ['MSFT', 'NVDA'], ['test-ipo'], 'v5'])
+        assertEquals([p.label, p.stock_codes, p.us_tickers, p.events, p.gate_version], ['market', ['900001'], ['MSFT', 'NVDA'], ['test-ipo'], 'v6'])
         assertEquals((await getPost(2009)).label, 'noise')
+      })
+
+      // A long post is gated as numbered parts; its chunks are stored with their own tags, and replaced when it's
+      // gated again (gone once the post is short)
+      const filler = (s: string) => `${s} ${'시장 해설 문장입니다. '.repeat(20)}`
+      const digest = ['🌎 브리핑', '🇺🇸 아메리카', `• ${filler('엔비디아 강세.')}`, `• ${filler('돌파전자 수주.')}`,
+        '🌍 중동', `• ${filler('유가 상승.')}`, `• ${filler('호르무즈 긴장.')}`, `• ${filler('앤트로픽 상장 준비.')}`, `• ${filler('기타 소식.')}`].join('\n\n')
+      assert(digest.length > 1500, `digest is ${digest.length} characters`)
+      await withGatePosts([gatePost(2017, digest)], async () => {
+        const { client, calls } = fakeClaude((text) => ({
+          label: 'market',
+          companies: [
+            { written: '엔비디아', listed_name: 'NVIDIA', market: 'US', id: 'NVDA' },
+            { written: '돌파전자', listed_name: '돌파전자', market: 'KR', id: '900001' },
+          ],
+          events: [],
+          ...(text.includes('[1]') ? { chunk_events: [{ part: 5, events: ['test-ipo'] }] } : {}),
+        }))
+        await gateBatch(db, client, 10)
+        assert(calls[0].includes('[1]\n🌎 브리핑') && calls[0].includes('[6]\n'), 'the post went as numbered parts')
+        const rows = (await db.from('telegram_chunks').select('idx, text, stock_codes, us_tickers, events')
+          .eq('username', GATE_CH).eq('msg_id', 2017).order('idx')).data!
+        assertEquals(rows.length, 6)
+        assert(rows[0].text.startsWith('🌎 브리핑\n🇺🇸 아메리카\n• 엔비디아'))
+        assertEquals(rows.map((r) => [r.us_tickers, r.stock_codes, r.events]), [
+          [['NVDA'], [], []], [[], ['900001'], []], [[], [], []], [[], [], []], [[], [], ['test-ipo']], [[], [], []],
+        ])
+        const p = await getPost(2017)
+        assertEquals([p.stock_codes, p.us_tickers, p.events], [['900001'], ['NVDA'], ['test-ipo']]) // the post: all of them
+        // Edited short: gated again without parts, and its chunks are gone
+        await db.from('telegram_messages').update({ text: '엔비디아 강세' }).eq('username', GATE_CH).eq('msg_id', 2017)
+        await gateBatch(db, client, 10)
+        assertEquals(calls[1].includes('[1]'), false)
+        const { count } = await db.from('telegram_chunks').select('idx', { count: 'exact', head: true }).eq('username', GATE_CH).eq('msg_id', 2017)
+        assertEquals(count, 0)
       })
 
       // Every call failing is reported as a gate error (the run fails and alerts); the post stays ungated
@@ -977,7 +1012,7 @@ Deno.test('X gate: posts are read with the post they quote, labeled and tagged; 
     assert(quoted.includes('Has an image'), 'images count as media')
     const get = async (id: string) => (await db.from('x_posts').select('label, us_tickers, gate_version, gated_at').eq('id', id).single()).data!
     const a = await get('9100000000000000001')
-    assertEquals([a.label, a.us_tickers, a.gate_version], ['market', ['MSFT', 'NVDA'], 'v5'])
+    assertEquals([a.label, a.us_tickers, a.gate_version], ['market', ['MSFT', 'NVDA'], 'v6'])
     assertEquals((await get('9100000000000000002')).label, 'noise')
 
     // a poll that sends the same text keeps the tags; an edit re-gates

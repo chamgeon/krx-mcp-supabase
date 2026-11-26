@@ -3,7 +3,8 @@
 // Run from the repo root: deno task test
 
 import { assertEquals, assertThrows } from 'jsr:@std/assert@1.0.19'
-import { checker, type Company, coreName, outputSchema, parseSymbolFile } from './gate.ts'
+import type Anthropic from 'npm:@anthropic-ai/sdk@1.5.0'
+import { askGate, checker, chunkTags, type Company, coreName, mentions, outputSchema, parseSymbolFile, systemPrompt, userMessage } from './gate.ts'
 
 const stocks = [
   { isu_cd: '005930', isu_nm: '삼성전자' },
@@ -93,8 +94,62 @@ Deno.test('the output schema uses only keywords structured outputs accept', () =
       ? Object.entries(v).flatMap(([k, x]) => [...(unsupported.includes(k) ? [`${path}.${k}`] : []), ...walk(x, `${path}.${k}`)])
       : []
   for (const events of [[], [{ id: 'anthropic-ipo', description: 'x' }]]) {
-    assertEquals(walk(outputSchema(events), 'schema'), [], `${events.length} events`)
+    for (const chunked of [false, true]) {
+      assertEquals(walk(outputSchema(events, chunked), 'schema'), [], `${events.length} events, chunked ${chunked}`)
+    }
   }
+})
+
+// ---- chunked posts (v6) ---------------------------------------------------------------------------
+
+const EV = [{ id: 'anthropic-ipo', description: 'Anthropic IPO' }]
+const post = { username: 'ch', ts: '2026-11-18T00:00:00Z', text: 'whole text', has_media: false, forwarded_from: null }
+
+Deno.test('chunked: parts are numbered in the message; chunk_events only with events; v5 prompt otherwise', () => {
+  const msg = userMessage({ ...post, chunks: ['엔비디아 실적', '앤트로픽 상장'] })
+  assertEquals(msg.split('<post>\n')[1], '[1]\n엔비디아 실적\n\n[2]\n앤트로픽 상장\n</post>')
+  assertEquals(userMessage(post).includes('whole text'), true)
+  const schema = outputSchema(EV, true)
+  assertEquals(schema.required, ['label', 'companies', 'events', 'chunk_events'])
+  assertEquals('chunk_events' in outputSchema(EV, false).properties, false)
+  assertEquals('chunk_events' in outputSchema([], true).properties, false) // no events to place: nothing to ask
+  assertEquals(systemPrompt(EV, false), systemPrompt(EV)) // unchunked: v5's prompt exactly
+  assertEquals(systemPrompt(EV, true).includes('numbered parts'), true)
+  assertEquals(systemPrompt([], true), systemPrompt([]))
+})
+
+Deno.test('chunked: askGate reads chunk_events by part number; the post gets every event its parts name', async () => {
+  const answer = {
+    label: 'market',
+    companies: [],
+    events: [],
+    chunk_events: [{ part: 2, events: ['anthropic-ipo', 'unknown-event'] }, { part: 9, events: ['anthropic-ipo'] }],
+  }
+  const client = {
+    messages: {
+      create: () => Promise.resolve({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(answer) }], usage: { input_tokens: 1, output_tokens: 1 } }),
+    },
+  } as unknown as Anthropic
+  const a = await askGate(client, { ...post, chunks: ['a', 'b', 'c'] }, EV)
+  assertEquals(a.chunkEvents, [[], ['anthropic-ipo'], []]) // part 9 doesn't exist: ignored
+  assertEquals(a.events, ['anthropic-ipo'])
+  assertEquals((await askGate(client, post, EV)).chunkEvents, undefined)
+})
+
+Deno.test('chunkTags: a company goes to the chunks that contain its written name, checked like the post', () => {
+  const chunks = ['엔비디아와 삼성 전자 동반 상승', 'SK하이닉스는 보합', '시장 전반 해설']
+  const companies = [
+    us('엔비디아', 'NVIDIA', 'NVDA'),
+    kr('삼성전자', '삼성전자', '005930'), // written without the space the chunk has: spacing is ignored
+    kr('SK하이닉스', 'SK하이닉스', '000660'),
+    us('구글', 'Alphabet', 'GOOGL'), // named by the model but in no chunk: stays on the post only
+  ]
+  const tags = chunkTags(chunks, companies, check, [['anthropic-ipo'], [], []])
+  assertEquals(tags, [
+    { stock_codes: ['005930'], us_tickers: ['NVDA'], events: ['anthropic-ipo'] },
+    { stock_codes: ['000660'], us_tickers: [], events: [] },
+    { stock_codes: [], us_tickers: [], events: [] },
+  ])
 })
 
 Deno.test('parseSymbolFile: both files, without ETFs and test issues', () => {
@@ -114,4 +169,27 @@ Deno.test('parseSymbolFile: both files, without ETFs and test issues', () => {
   assertEquals(parseSymbolFile('otherlisted', other), [{ ticker: 'BRK.B', name: 'Berkshire Hathaway Inc. New Common Stock', exchange: 'NYSE' }])
   // a format change is an error, not an empty list
   assertThrows(() => parseSymbolFile('nasdaqlisted', 'Ticker|Name\nNVDA|NVIDIA'), Error, 'unexpected header')
+})
+
+Deno.test('mentions: a name is matched as a word of its own (found in a real v6 run, 11-26)', () => {
+  assertEquals(mentions('소비자 구매력 개선', '비자'), false) // Visa read inside 소비자
+  assertEquals(mentions('비자(+1.2%)는 강세', '비자'), true)
+  assertEquals(mentions('AMS 장비와 MSCI 지수', 'MS'), false)
+  assertEquals(mentions('MS(-2.83%)는 회사채 발행', 'MS'), true)
+  assertEquals(mentions('AI 서버: 델 실적 호조. 델(+0.60%)', '델'), true) // one syllable: allowed now
+  assertEquals(mentions('델은 매출이 늘었다', '델'), true) // a particle may follow
+  assertEquals(mentions('델타항공은 하락', '델'), false)
+  assertEquals(mentions('강세 갭(+11.44%)은', '갭'), true)
+  assertEquals(mentions('엔비디아와 삼성 전자', '삼성전자'), true) // spacing ignored
+  assertEquals(mentions('SK하이닉스의 실적', 'sk하이닉스'), true) // case ignored, a particle after a long name
+})
+
+Deno.test('OTHER: a company the model calls unlisted is tagged only by an exact listing name or an alias', () => {
+  const withAnt = checker(stocks, [...symbols, { ticker: 'ANT', name: 'Anthropic PBC - Class A Common Stock' }])
+  const other = (written: string, listed_name: string): Company => ({ written, listed_name, market: 'OTHER', id: '' })
+  assertEquals(withAnt([other('앤트로픽', '앤트로픽')]).us, ['ANT']) // Korean alias
+  assertEquals(withAnt([other('앤스로픽', 'Anthropic')]).us, ['ANT']) // English name, exact
+  assertEquals(withAnt([other('오픈AI', 'OpenAI')]).us, []) // not listed
+  assertEquals(withAnt([other('카카오', '카카오')]).us, [])
+  assertEquals(check([other('앤트로픽', 'Anthropic')]).us, []) // no ANT in the list: nothing
 })

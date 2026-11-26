@@ -166,6 +166,15 @@ What was done and why. Oldest first; new entries go at the bottom.
 - The daily report has a `Markets` line (each set expected on the days it runs) and a YouTube line (polls, new videos,
   transcripts, videos waiting for captions). YouTube transcripts stay ungated: every channel is a market channel.
 
+## 2026-11-26 — Telegram chunks (built, not deployed)
+- Posts over 1,500 characters (10% of posts, half of all text) are split by `_shared/chunk.ts`, one item per chunk;
+  the post's headers, bullets and paragraphs decide the cuts. On all 238 long posts: 4,167 chunks, median 98 chars.
+- **Decided:** a chunk stores only its text and tags (`telegram_chunks`); its post's metadata says where it's from.
+- Gate v6 tags each chunk in the same call; the post keeps the union. Filtered feeds show only matching chunks.
+- A dry run on 10 real posts led to word-aware name matching (비자 matched inside 소비자) and tagging companies the
+  model calls unlisted when the name exactly matches a US listing (Anthropic → ANT; v5 never tagged it).
+- **Decided:** no YouTube chunking; transcripts are different data, and paging plus `query` are enough.
+
 ## Open
 - Cold calls (+2.2–3.5 s each, every tool): keep-warm ping vs. moving the project to `us-east-1`. A ping keeps workers
   alive but probably not the DB connection (a 60 s pause already pays ~400–600 ms). Also `screen_stocks`' cold SQL
@@ -177,7 +186,6 @@ What was done and why. Oldest first; new entries go at the bottom.
 - Markets: check the first 18:00 report's `Markets` and YouTube lines (YouTube needs `pipeline-report` deployed);
   KRW/USD updates in the evening session (only daytime probed); the 18:30 국고채 value is the day's final one; Yahoo 429s
   over a full US session (Monday 11-30). Not collected: BOK base rate (ECOS key), US 2Y (Treasury.gov daily).
-- Normalized chunks for Telegram posts: digests split by topic, so a filtered feed shows the relevant part (e.g.
-  `event: anthropic-ipo`: 30 of 77 posts mention it only after their first 600 characters). Open: how to split, and
-  whether the feed counts posts or chunks.
+- Telegram chunks: deploy (`supabase db push --remote` for 20261126000004, then `telegram-ingest` and `mcp`); after
+  the ~6 re-gating runs, spot-check chunks and their tags on real digests, and `get_telegram_feed(event: …)` sizes.
 - Thesis tracking (plan.md → Phase 4): build 4.1 (tables, thesis tools, `add_event`).

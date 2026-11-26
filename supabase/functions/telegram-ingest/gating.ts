@@ -4,13 +4,16 @@
 // drains at GATE_BATCH posts per 5-minute run. A failed call leaves the post ungated (shown, untagged) for the next
 // run. An event is offered only to posts inside its window (eventsAt). Two runs at once (a manual ?gate=N during a
 // scheduled run) can take the same posts: harmless, a post is just gated twice. Also keeps us_symbols fresh (daily) for the US check and find_us_stock.
+// A Telegram post over CHUNK_POSTS_OVER characters is gated as numbered chunks (../_shared/chunk.ts), and its chunks
+// are stored with their own tags in telegram_chunks (replaced on every gating; none for a shorter post).
 
 import type Anthropic from 'npm:@anthropic-ai/sdk@1.5.0'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0'
 import {
-  askGate, checker, GATE_VERSION, type GateEvent, type GateInput, parseSymbolFile, type Stock, SYMBOL_FILES,
+  askGate, checker, chunkTags, GATE_VERSION, type GateEvent, type GateInput, parseSymbolFile, type Stock, SYMBOL_FILES,
   symbolFileUrl, type UsSymbol,
 } from '../_shared/gate.ts'
+import { CHUNK_POSTS_OVER, chunkPost } from '../_shared/chunk.ts'
 
 export const GATE_BATCH = 40 // posts per run: ~10 s at 8 calls at a time; a backlog of 1,000 posts drains in ~2 hours
 export const GATE_MAX = 500 // posts in one gate-only run (?gate=N), within the deadline below
@@ -113,6 +116,7 @@ export type GateTarget = {
   input: (row: Row) => GateInput // what the model reads
   key: (row: Row) => Record<string, string | number> // the row to write back to
   name: (row: Row) => string // in error messages
+  chunks?: string // the table long posts' chunks go to (Telegram only)
 }
 export const TELEGRAM_POSTS: GateTarget = {
   table: 'telegram_messages',
@@ -120,6 +124,7 @@ export const TELEGRAM_POSTS: GateTarget = {
   input: (r) => ({ username: r.username, ts: r.ts, text: r.text, has_media: r.has_media, forwarded_from: r.forwarded_from }),
   key: (r) => ({ username: r.username, msg_id: r.msg_id }),
   name: (r) => `${r.username}/${r.msg_id}`,
+  chunks: 'telegram_chunks',
 }
 // An X post is read with the post it quotes (a quote is often only a comment on it), and its images count as media
 export const X_POSTS: GateTarget = {
@@ -159,8 +164,22 @@ export async function gateBatch(
     const errors: string[] = []
     await pool(posts as unknown as Row[], GATE_CONCURRENCY, async (p) => {
       try {
-        const a = await askGate(client, target.input(p), eventsAt(allEvents, p.ts))
+        const input = target.input(p)
+        const parts = target.chunks && input.text.length > CHUNK_POSTS_OVER ? chunkPost(input.text) : []
+        const chunks = parts.length > 1 ? parts : []
+        const a = await askGate(client, chunks.length ? { ...input, chunks } : input, eventsAt(allEvents, p.ts))
         const c = check(a.companies)
+        // Chunks first: if saving the post fails after this, it stays ungated and the next run replaces them
+        if (target.chunks) {
+          const del = await supabase.from(target.chunks).delete().match(target.key(p))
+          if (del.error) throw new Error(`chunks: ${del.error.message}`)
+          if (chunks.length) {
+            const tags = chunkTags(chunks, a.companies, check, a.chunkEvents)
+            const ins = await supabase.from(target.chunks)
+              .insert(chunks.map((text, idx) => ({ ...target.key(p), idx, text, ...tags[idx] })))
+            if (ins.error) throw new Error(`chunks: ${ins.error.message}`)
+          }
+        }
         const { error: e } = await supabase.from(target.table).update({
           label: a.label,
           stock_codes: c.kr,
