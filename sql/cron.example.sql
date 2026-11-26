@@ -23,6 +23,11 @@
 --               due (Apify; needs the APIFY_API_KEY secret).
 --   x-ingest  every 5 min (4 min after telegram-ingest), daily
 --               new posts from every collected X account, one Apify run for all of them (needs APIFY_API_KEY).
+--   market-ingest  ?set=live  every 5 min (1 min after kis-ingest), 09:01–01:56 KST  (00–16 UTC)  Mon–Fri
+--               KRW/USD (the Seoul FX session runs 09:00–02:00 KST), plus KOSPI / KOSDAQ during 09:00–15:40 KST,
+--               into market_quotes (one row per symbol, overwritten).
+--   market-ingest  ?set=bonds  18:30 KST  (09:30 UTC)  Mon–Fri
+--               국고채 1/3/5/10/20/30년 yields, the day's final value.
 --   pipeline-report  18:00 KST          (09:00 UTC)              daily
 --               Telegram report of the last 24 h of ingest runs (needs the TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
 --               secrets). Already set up? Add only this job.
@@ -141,6 +146,34 @@ select cron.schedule(
   $$
 );
 
+select cron.schedule(
+  'market-ingest-live',
+  '1-59/5 0-16 * * 1-5',
+  $$
+  select net.http_post(
+    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/market-ingest?set=live',
+    -- x-region: run in Seoul, next to the KIS API
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-region', 'ap-northeast-2', 'x-ingest-secret', '<INGEST_SECRET>'),
+    body := '{}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $$
+);
+
+select cron.schedule(
+  'market-ingest-bonds',
+  '30 9 * * 1-5',
+  $$
+  select net.http_post(
+    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/market-ingest?set=bonds',
+    -- x-region: run in Seoul, next to the KIS API
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-region', 'ap-northeast-2', 'x-ingest-secret', '<INGEST_SECRET>'),
+    body := '{}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $$
+);
+
 -- Ingest runs:  select * from ingest_runs order by started_at desc limit 20;
 -- Check runs:   select * from cron.job_run_details order by start_time desc limit 10;
 -- HTTP results: select * from net._http_response order by created desc limit 10;
@@ -152,3 +185,5 @@ select cron.schedule(
 --               select cron.unschedule('youtube-ingest');
 --               select cron.unschedule('x-ingest');
 --               select cron.unschedule('pipeline-report');
+--               select cron.unschedule('market-ingest-live');
+--               select cron.unschedule('market-ingest-bonds');

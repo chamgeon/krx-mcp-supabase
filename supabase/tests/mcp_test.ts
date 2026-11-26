@@ -181,6 +181,7 @@ test('tools/list: exactly the expected tools, each described', async () => {
   const { tools } = await (await keyClient()).listTools()
   assertEquals(tools.map((t) => t.name).sort(), [
     'add_telegram_channel', 'analyze_stock', 'check_available_dates', 'find_stock', 'find_us_stock', 'get_daily_movers',
+    'get_market_overview',
     'get_my_channels', 'get_stock_history', 'get_telegram_feed', 'list_telegram_channels', 'list_telegram_events',
     'screen_stocks', 'search_telegram', 'set_my_channels', 'update_my_channels',
     'add_youtube_channel', 'get_my_youtube_channels', 'get_youtube_transcript', 'list_youtube_channels', 'list_youtube_videos',
@@ -330,6 +331,39 @@ test('invalid arguments are rejected by the schema, not crashed on', async () =>
   for (const k of ['avg_days', 'sideways_days', 'volatility_days']) {
     const s = await (await keyClient()).callTool({ name: 'screen_stocks', arguments: { [k]: 61 } })
     assert(s.isError, `screen_stocks ${k}: 61 should fail validation (max 60)`)
+  }
+})
+
+// ---- market overview (seeded here: no test reaches KIS) ----------------------------------------------
+
+test('get_market_overview: indices, KRW/USD and bond yields with changes; empty table says so', async () => {
+  await admin.from('market_quotes').delete().neq('symbol', '')
+  const empty = await call('get_market_overview')
+  assertEquals([empty.indices, empty.fx, empty.kr_government_bonds, empty.note], [[], [], [], 'No market data collected yet.'])
+
+  const at = '2026-11-26T04:10:00Z' // 13:10 KST
+  const q = (symbol: string, kind: string, name: string, price: number, prev: number, unit: string) =>
+    ({ symbol, kind, name, price, prev_close: prev, unit, value_date: '2026-11-26', fetched_at: at })
+  const ins = await admin.from('market_quotes').insert([
+    q('KR10Y', 'rate', '국고채 10년', 3.816, 3.761, '%'),
+    q('USDKRW', 'fx', '원/달러', 1342.9, 1344.3, 'KRW'),
+    q('KOSDAQ', 'index', 'KOSDAQ', 663.54, 650.64, 'pt'),
+    q('KOSPI', 'index', 'KOSPI', 4757.43, 4697.51, 'pt'),
+  ])
+  if (ins.error) throw new Error(ins.error.message)
+  try {
+    const r = await call('get_market_overview')
+    assertEquals(r.indices.map((x: Json) => x.symbol), ['KOSPI', 'KOSDAQ']) // fixed order, not insert order
+    assertEquals(r.indices[0], {
+      symbol: 'KOSPI', name: 'KOSPI', value: 4757.43, unit: 'pt', prev_close: 4697.51, change: 59.92, change_pct: 1.28,
+      value_date: '2026-11-26', as_of: '2026-11-26 13:10 KST',
+    })
+    assertEquals([r.fx[0].change, r.fx[0].change_pct], [-1.4, -0.1])
+    assertEquals(r.kr_government_bonds[0].change_bp, 5.5) // yields: basis points, no % change
+    assertEquals('change_pct' in r.kr_government_bonds[0], false)
+    assertEquals(r.note, undefined)
+  } finally {
+    await admin.from('market_quotes').delete().neq('symbol', '')
   }
 })
 

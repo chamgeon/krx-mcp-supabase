@@ -6,8 +6,10 @@
 //   deno task fixtures krx 20261113    # KRX for one day (default 20261113)
 //   deno task fixtures kis             # KIS snapshot now (live during the session, last close otherwise)
 //   deno task fixtures telegram ehdwl  # one public channel's preview page (default ehdwl)
+//   deno task fixtures market          # KIS: KOSPI/KOSDAQ, KRW/USD, KR government bond yields (market-ingest)
 //
-// Each run costs: KRX 2 calls (daily limit ~10,000), KIS 1 token + 1 quote call, Telegram 1 page.
+// Each run costs: KRX 2 calls (daily limit ~10,000), KIS 1 token + 1 quote call, Telegram 1 page; market: KIS 1 token
+// + 10 calls.
 
 const ROOT = new URL('../supabase/functions/', import.meta.url)
 const KRX_DIR = new URL('krx-ingest/fixtures/', ROOT)
@@ -110,6 +112,43 @@ async function kis(env: Record<string, string>, basDd: string) {
     JSON.stringify({ fetched_at: fetchedAt, requested_codes: codes, krx_list_from: basDd, body }, null, 1))
 }
 
+// ---- market-ingest (KIS: KOSPI/KOSDAQ, KRW/USD, KR government bond yields) --------------------------
+
+async function market(env: Record<string, string>) {
+  const appkey = need(env, 'KIS_APP_KEY')
+  const appsecret = need(env, 'KIS_APP_SECRET')
+  const base = 'https://openapi.koreainvestment.com:9443'
+  const tok = await fetch(`${base}/oauth2/tokenP`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ grant_type: 'client_credentials', appkey, appsecret }),
+  })
+  if (!tok.ok) throw new Error(`KIS token: HTTP ${tok.status} ${(await tok.text()).slice(0, 200)}`)
+  const { access_token } = await tok.json()
+  const get = async (path: string, trId: string, params: Record<string, string>) => {
+    await new Promise((r) => setTimeout(r, 250))
+    const res = await fetch(`${base}${path}?${new URLSearchParams(params)}`, {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', authorization: `Bearer ${access_token}`, appkey, appsecret, tr_id: trId, custtype: 'P' },
+    })
+    return { params, body: await res.json() }
+  }
+  const ymd = (ms: number) => new Date(ms + 9 * 3600_000).toISOString().slice(0, 10).replace(/-/g, '')
+  const chart = (div: string, code: string) =>
+    get('/uapi/overseas-price/v1/quotations/inquire-daily-chartprice', 'FHKST03030100', {
+      FID_COND_MRKT_DIV_CODE: div, FID_INPUT_ISCD: code, FID_INPUT_DATE_1: ymd(Date.now() - 14 * 86400_000), FID_INPUT_DATE_2: ymd(Date.now()), FID_PERIOD_DIV_CODE: 'D',
+    })
+  const index = (code: string) =>
+    get('/uapi/domestic-stock/v1/quotations/inquire-index-price', 'FHPUP02100000', { FID_COND_MRKT_DIV_CODE: 'U', FID_INPUT_ISCD: code })
+  const out: Record<string, unknown> = {}
+  for (const c of ['0001', '1001']) out[`index_${c}`] = await index(c)
+  out['fx_FX@KRW'] = await chart('X', 'FX@KRW')
+  // 국고채 1/3/5/10/20/30년, plus an unknown code (what an empty answer looks like)
+  for (const c of ['Y0104', 'Y0101', 'Y0105', 'Y0106', 'Y0116', 'Y0117', 'Y0999']) out[`bond_${c}`] = await chart('I', c)
+  const fetchedAt = new Date().toISOString()
+  const stamp = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '_')
+  await save(new URL('market-ingest/fixtures/', ROOT), `kis_market_${stamp}.json`, JSON.stringify({ fetched_at: fetchedAt, responses: out }, null, 1))
+}
+
 // ---- Telegram -------------------------------------------------------------------------------------
 
 async function telegram(channel: string) {
@@ -128,4 +167,5 @@ const env = what === 'telegram' ? {} : loadEnv()
 const basDd = what === 'krx' && arg ? arg : '20261113'
 if (what === 'all' || what === 'krx') await krx(env, basDd)
 if (what === 'all' || what === 'kis') await kis(env, basDd)
+if (what === 'all' || what === 'market') await market(env)
 if (what === 'all' || what === 'telegram') await telegram(what === 'telegram' && arg ? arg : 'ehdwl')

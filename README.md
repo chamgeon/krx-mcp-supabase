@@ -40,6 +40,7 @@ news for why a stock moved.
 | `get_stock_history(code, days)` | Recent daily OHLCV rows for one stock |
 | `find_stock(name)` | 종목명 → 종목코드 |
 | `check_available_dates(date?)` | Without a date: total, first and last trading day. With a date: whether it has data (final or provisional), or the nearest trading days around it |
+| `get_market_overview()` | Latest KOSPI / KOSDAQ, 원/달러 and 국고채 1–30년 yields, each with its previous close and change, value date and fetch time (no history) |
 | `add_telegram_channel(channel)` | Starts collecting a public Telegram channel (needs a `t.me/s/<name>` preview), returns the latest posts after one page, and backfills ~30 days in the background (feed/search note a channel that is still filling) |
 | `list_telegram_channels()` | Collected channels with post counts, latest post and poll status |
 | `get_telegram_feed(channel?, stock?, since?, all_channels?)` | Recent posts from the user's channels (or all), newest first, with links and the stocks they mention |

@@ -20,3 +20,6 @@ verify_jwt = false
 
 [functions.x-ingest]
 verify_jwt = false
+
+[functions.market-ingest]
+verify_jwt = false

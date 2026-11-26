@@ -1006,6 +1006,25 @@ What was done and why. Oldest first; new entries go at the bottom.
   `analyze_stock` keeps 120 (one stock). The SQL function still accepts 120 (MCP is its only caller).
   `mcp_test.ts` checks 61 is rejected for each.
 
+## 2026-11-26 — Korean market indicators: `market_quotes` + `market-ingest` (deployed the same day)
+- **Decided:** one table of current values (one row per symbol, overwritten; `price` + `prev_close`, no stored change),
+  US stocks later in a table of their own. KIS only for Korean data; US indices, US yields and the BOK base rate are
+  left open (KIS has SPX/COMP/NDX/SOX/VIX and US yields, but not the Dow or Russell 2000; Alpaca has no index values;
+  Treasury.gov's daily curve, no key, is ready the same evening ET).
+- **Probed (11-26, KIS, read-only, production's cached token):** KOSPI `0001` / KOSDAQ `1001` (inquire-index-price):
+  live mid-session. KRW/USD `FX@KRW` (서울외국환중개): **real time**, 1343.1 → 1343.2 → 1343.1 → 1342.9 over 13:08–13:11.
+  국고채 `Y0104/0101/0105/0106/0116/0117` (chart endpoint, market `I`): at 12:37 still the 11-25 value, at 13:11 a value
+  for 11-26, so KIS updates them during the day but not continuously; fetched once a day for the final value. An
+  unknown code answers rt_cd 0 with zeros. US condition search pages 100 at a time (Nasdaq 4,534 stocks = 46 calls),
+  so a whole-US snapshot is ~as cheap as kis-ingest's.
+- **Done:** migration `20261126000001_market_quotes.sql`; `market-ingest` (`?set=live`: KRW/USD, plus KOSPI/KOSDAQ
+  09:00–15:40 KST when KOSPI's newest bar is today; `?set=bonds`: 국고채 1–30년), each symbol on its own so one failure
+  names itself; values rounded to the unit (KIS sends `1344.2999`); `get_market_overview` (MCP: change and % for
+  indices/FX, basis points for yields, value_date and as_of); cron jobs in `sql/cron.example.sql` (live every 5 min
+  09:01–01:56 KST Mon–Fri, 1 min after kis-ingest; bonds 18:30 KST); `deno task fixtures market`.
+  Local: `check`, `test` (177), `test:db` (43), `test:mcp` (53) pass; `market-ingest` run end to end locally against
+  KIS stored all 9 symbols.
+
 ## Open
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
   next to the database, every minute) vs. moving the project to us-east-1. A ping every minute would keep workers
@@ -1033,6 +1052,11 @@ What was done and why. Oldest first; new entries go at the bottom.
   the per-step `timings`. Database-backed read-only tools only, outside the session (no KIS or t.me calls), via the
   operator key (unlogged); short runs, within free-plan fair use. Framed as knowing the limits, not as needing scale.
 - 11-30: check the `live_prices` cleanup (no day older than 10 days).
+- `market-ingest` (deployed 11-26: migration, `market-ingest` v1, `mcp` v63, cron jobs `market-ingest-live` and
+  `market-ingest-bonds`; first run 14:01 KST ok, 1.6 s, 3 symbols). Check: KRW/USD keeps updating in the evening session
+  (15:30–02:00 KST; only the daytime was probed), and the 18:30 bonds value is the day's final one.
+- US market data (open): US indices (KIS or other), US stocks (own table; KIS condition search or Alpaca), US yields
+  (Treasury.gov daily; intraday unknown), BOK base rate (ECOS key).
 - `screen_stocks` window cap (11-26, built, not deployed): deploy `mcp`, then check that `avg_days: 61` is
   rejected. After that, watch `tool_calls` for `screen_stocks` timeouts.
 - Telegram gate, after deploy: watch the backlog drain (`gate.left` in telegram-ingest's `ingest_runs` summary), the

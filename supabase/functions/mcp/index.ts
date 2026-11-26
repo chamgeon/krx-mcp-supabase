@@ -693,6 +693,56 @@ const handler = createMcpHandler((ctx) => {
     },
   )
 
+  server.registerTool(
+    'get_market_overview',
+    {
+      title: '시장 지표 (지수·환율·국고채)',
+      description:
+        'Latest Korean market indicators, one value each (no history): KOSPI and KOSDAQ (real time during the ' +
+        '09:00–15:30 KST session, refreshed every 5 minutes), 원/달러 KRW per USD (real time 09:00–02:00 KST, every 5 ' +
+        'minutes), and 국고채 1/3/5/10/20/30-year yields (once a day, the day\'s final value, fetched at 18:30 KST). ' +
+        'Each row has the value, the previous close, the change (index points or won; basis points for yields), ' +
+        'value_date (the trading day the value belongs to) and as_of (when it was fetched). US indices, US yields and ' +
+        'the BOK base rate aren\'t collected yet.',
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const { data, error } = await step('market_quotes', supabase.from('market_quotes')
+        .select('symbol, kind, name, price, prev_close, unit, value_date, fetched_at'))
+      if (error) throw new Error(error.message)
+      const order = ['KOSPI', 'KOSDAQ', 'USDKRW', 'KR1Y', 'KR3Y', 'KR5Y', 'KR10Y', 'KR20Y', 'KR30Y']
+      const rows = (data ?? []).sort((a, b) => (order.indexOf(a.symbol) + 1 || 99) - (order.indexOf(b.symbol) + 1 || 99))
+      const kst = (t: string) => new Date(Date.parse(t) + 9 * 3600_000).toISOString().slice(0, 16).replace('T', ' ') + ' KST'
+      const row = (r: (typeof rows)[number]) => {
+        const price = Number(r.price)
+        const prev = r.prev_close == null ? null : Number(r.prev_close)
+        const diff = prev == null ? null : price - prev
+        return {
+          symbol: r.symbol,
+          name: r.name,
+          value: price,
+          unit: r.unit,
+          prev_close: prev,
+          ...(r.kind === 'rate'
+            ? { change_bp: diff == null ? null : Math.round(diff * 1000) / 10 }
+            : {
+              change: diff == null ? null : Math.round(diff * 100) / 100,
+              change_pct: diff == null || !prev ? null : Math.round((diff / prev) * 10000) / 100,
+            }),
+          value_date: r.value_date,
+          as_of: kst(r.fetched_at),
+        }
+      }
+      return json({
+        indices: rows.filter((r) => r.kind === 'index').map(row),
+        fx: rows.filter((r) => r.kind === 'fx').map(row),
+        kr_government_bonds: rows.filter((r) => r.kind === 'rate').map(row),
+        ...(rows.length ? {} : { note: 'No market data collected yet.' }),
+      })
+    },
+  )
+
   registerTelegramTools(server, supabase, caller.userId)
   registerYoutubeTools(server, supabase, caller.userId)
   registerXTools(server, supabase, caller.userId)
