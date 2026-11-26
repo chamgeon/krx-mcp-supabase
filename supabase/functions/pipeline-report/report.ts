@@ -37,6 +37,7 @@ const M = (x: number) => (x >= 1e6 ? `${(x / 1e6).toFixed(2)}M` : `${Math.round(
  *                        still holds Friday night's runs)
  *   market-ingest-bonds  18:30 KST Mon–Fri: in the window when yesterday was a weekday
  *   market-ingest-us     every 5 min 22:03–06:58 KST, US weekdays: in the window when yesterday was a weekday
+ *   market-ingest-global every 10 min, every day: always in the window
  * One ✅ line when every expected job ran with at least one success; otherwise ❌ naming each one that didn't run, or
  * ran without a single success (its failures are also in the failed-runs list). Null when none was expected or ran.
  */
@@ -46,6 +47,7 @@ export function marketReport(runs: Run[], dow: number): string | null {
     { job: 'market-ingest-live', label: 'KR', expected: dow !== 0 },
     { job: 'market-ingest-bonds', label: 'KR bonds', expected: prevWeekday },
     { job: 'market-ingest-us', label: 'US', expected: prevWeekday },
+    { job: 'market-ingest-global', label: 'gold/silver/BTC', expected: true },
   ]
   const problems: string[] = []
   const parts: string[] = []

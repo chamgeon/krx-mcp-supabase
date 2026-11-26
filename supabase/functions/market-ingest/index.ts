@@ -6,13 +6,14 @@
 //   POST /functions/v1/market-ingest?set=us      -> Yahoo Finance (yahoo-finance2): US indices and Treasury yields
 //                                                   (market_quotes), and the US tickers mentioned in Telegram / X
 //                                                   posts in the last 90 days plus fixed ETFs (us_quotes); ./us.ts
+//   POST /functions/v1/market-ingest?set=global  -> Yahoo Finance: gold and silver futures, Bitcoin (market_quotes)
 //
 // Called by pg_cron (sql/cron.example.sql): `live` every 5 min 09:00–02:00 KST on weekdays (the Seoul FX session),
-// `bonds` once a day at 18:30 KST, `us` every 5 min 22:00–06:55 KST on US weekdays. Protected by the x-ingest-secret
-// header. Each set is recorded as its own job (market-ingest-live / -bonds / -us). KIS symbols are fetched one by one,
-// so one failing symbol doesn't stop the others; the run then fails (500) and names it, and the alert goes out as for
-// other jobs. Yahoo is one call per 1,000 symbols: a failed call fails the run; a stock missing from the answer is
-// only listed (`missing`), an index or yield missing fails it.
+// `bonds` once a day at 18:30 KST, `us` every 5 min 22:00–06:55 KST on US weekdays, `global` every 10 min every day.
+// Protected by the x-ingest-secret header. Each set is recorded as its own job (market-ingest-live / -bonds / -us /
+// -global). KIS symbols are fetched one by one, so one failing symbol doesn't stop the others; the run then fails (500)
+// and names it, and the alert goes out as for other jobs. Yahoo is one call per 1,000 symbols: a failed call fails the
+// run; a stock missing from the answer is only listed (`missing`), an index, yield, metal or coin missing fails it.
 
 import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
@@ -20,7 +21,7 @@ import { kisGet, kisToken } from '../_shared/kis.ts'
 import { monitored } from '../_shared/ops.ts'
 import { BONDS, chartDate, FX, inIndexHours, INDICES, type Kind, parseChart, parseIndex, type Quote } from './parse.ts'
 import YahooFinance from 'jsr:@gadicc/yahoo-finance2@4.0.5'
-import { marketQuoteOf, MENTION_DAYS, QUOTE_BATCH, toYahoo, trackedTickers, US_INDICES, US_YIELDS, usQuoteOf, type UsQuote } from './us.ts'
+import { GLOBAL, marketQuoteOf, MENTION_DAYS, QUOTE_BATCH, toYahoo, trackedTickers, US_INDICES, US_YIELDS, usQuoteOf, type UsQuote } from './us.ts'
 
 const INGEST_SECRET = Deno.env.get('INGEST_SECRET')!
 const supabase = createClient(
@@ -55,9 +56,9 @@ Deno.serve(monitored(jobOf, supabase, async (req) => {
     return new Response('unauthorized', { status: 401 })
   }
   const set = new URL(req.url).searchParams.get('set') ?? 'live'
-  if (set === 'us') {
+  if (set === 'us' || set === 'global') {
     try {
-      const body = await usSet()
+      const body = set === 'us' ? await usSet() : await globalSet()
       return Response.json(body, { status: body.error ? 500 : 200 })
     } catch (e) {
       return Response.json({ set, error: (e as Error).message }, { status: 500 })
@@ -199,6 +200,32 @@ async function usSet() {
     stored: stocks.length,
     ...(missing.length ? { missing } : {}),
     ...(removed ? { removed } : {}),
+    ...(errors.length ? { error: errors.join('; ') } : {}),
+  }
+}
+
+// ---- ?set=global (Yahoo Finance): gold, silver, Bitcoin ------------------------------------------------------------
+
+async function globalSet() {
+  const yf = new YahooFinance({ suppressNotices: ['yahooSurvey'] })
+  // deno-lint-ignore no-explicit-any
+  const got = await yf.quote(GLOBAL.map((g) => g.yahoo), {}, { validateResult: false }) as any[]
+  const bySymbol = new Map((got ?? []).map((q) => [q.symbol, q]))
+  const quotes: Quote[] = []
+  const errors: string[] = []
+  for (const g of GLOBAL) {
+    const q = marketQuoteOf(bySymbol.get(g.yahoo), g, g.kind)
+    if (q) quotes.push(q)
+    else errors.push(`${g.symbol} (${g.yahoo}): no value in Yahoo's answer`)
+  }
+  if (quotes.length) {
+    const fetched_at = new Date().toISOString()
+    const { error } = await supabase.from('market_quotes').upsert(quotes.map((q) => ({ ...q, fetched_at })), { onConflict: 'symbol' })
+    if (error) throw new Error(`market_quotes: ${error.message}`)
+  }
+  return {
+    set: 'global',
+    stored: quotes.map((q) => `${q.symbol} ${q.price} (${q.value_date})`),
     ...(errors.length ? { error: errors.join('; ') } : {}),
   }
 }

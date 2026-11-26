@@ -23,6 +23,7 @@ const markets = [
   mk('live', '2026-11-17T09:01:00+09:00'), mk('live', '2026-11-17T17:56:00+09:00'),
   mk('bonds', '2026-11-16T18:30:00+09:00'),
   mk('us', '2026-11-17T05:03:00+09:00', true, { stored: 650 }), mk('us', '2026-11-17T06:58:00+09:00', true, { stored: 651 }),
+  mk('global', '2026-11-17T17:50:00+09:00'),
 ]
 const healthy = {
   end: END,
@@ -43,7 +44,7 @@ Deno.test('a healthy trading day', () => {
     '✅ KIS: 3 snapshots today, last 16:00 (2,771 stocks)',
     '✅ KRX official: latest 11-16 (2,789 stocks), loaded 11-16',
     '✅ Telegram: 2 polls, 5 new posts',
-    '✅ Markets: KR 2 runs, last 17:56; KR bonds 18:30; US 2 runs, last 06:58, 651 stocks',
+    '✅ Markets: KR 2 runs, last 17:56; KR bonds 18:30; US 2 runs, last 06:58, 651 stocks; gold/silver/BTC 17:50',
     '✅ No failed runs since yesterday 18:00',
   ].join('\n'))
 })
@@ -87,22 +88,24 @@ Deno.test('jobs that never ran are flagged', () => {
   const text = buildReport({ ...healthy, runs: [kis('15:40')] })
   assertStringIncludes(text, "❌ KRX: krx-ingest didn't run (07:00–08:30)")
   assertStringIncludes(text, "❌ Telegram: telegram-ingest didn't run")
-  assertStringIncludes(text, "❌ Markets: market-ingest-live didn't run; market-ingest-bonds didn't run; market-ingest-us didn't run")
+  assertStringIncludes(text, "❌ Markets: market-ingest-live didn't run; market-ingest-bonds didn't run; market-ingest-us didn't run; market-ingest-global didn't run")
 })
 
 Deno.test('markets: a set with only failed runs is flagged, the others listed as ok', () => {
   const runs = [...markets.filter((r) => r.job !== 'market-ingest-us'), mk('us', '2026-11-17T05:03:00+09:00', false), mk('us', '2026-11-17T05:08:00+09:00', false)]
   assertEquals(
     marketReport(runs, 2),
-    '❌ Markets: market-ingest-us: no successful run (2 failed runs) (ok: KR 2 runs, last 17:56; KR bonds 18:30)',
+    '❌ Markets: market-ingest-us: no successful run (2 failed runs) (ok: KR 2 runs, last 17:56; KR bonds 18:30; gold/silver/BTC 17:50)',
   )
 })
 
-Deno.test('markets: what each day expects (Sun nothing, Mon live only, Sat all three: Friday night is in the window)', () => {
-  assertEquals(marketReport([], 0), null) // Sunday: Sat 18:00 → Sun 18:00 has no runs
-  assertEquals(marketReport([], 1), "❌ Markets: market-ingest-live didn't run") // Monday: no bonds / US on Sunday
-  assertEquals(marketReport([], 6), "❌ Markets: market-ingest-live didn't run; market-ingest-bonds didn't run; market-ingest-us didn't run")
-  assertEquals(marketReport([mk('live', '2026-11-16T09:01:00+09:00')], 1), '✅ Markets: KR 09:01')
+Deno.test('markets: what each day expects (Sun global only, Mon live + global, Sat all: Friday night is in the window)', () => {
+  const g = mk('global', '2026-11-16T17:50:00+09:00')
+  assertEquals(marketReport([g], 0), '✅ Markets: gold/silver/BTC 17:50') // Sunday: only the 24/7 set
+  assertEquals(marketReport([], 0), "❌ Markets: market-ingest-global didn't run")
+  assertEquals(marketReport([g], 1), "❌ Markets: market-ingest-live didn't run (ok: gold/silver/BTC 17:50)") // Monday: no bonds / US on Sunday
+  assertEquals(marketReport([g], 6), "❌ Markets: market-ingest-live didn't run; market-ingest-bonds didn't run; market-ingest-us didn't run (ok: gold/silver/BTC 17:50)")
+  assertEquals(marketReport([mk('live', '2026-11-16T09:01:00+09:00'), g], 1), '✅ Markets: KR 09:01; gold/silver/BTC 17:50')
 })
 
 Deno.test('Telegram gate: posts, noise share, tokens and cost over the day; off when no run gated', () => {

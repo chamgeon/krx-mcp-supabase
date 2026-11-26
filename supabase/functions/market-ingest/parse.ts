@@ -2,14 +2,14 @@
 
 import { num } from '../_shared/kis.ts'
 
-export type Kind = 'index' | 'fx' | 'rate'
+export type Kind = 'index' | 'fx' | 'rate' | 'commodity' | 'crypto'
 export type Quote = {
   symbol: string
   kind: Kind
   name: string
   price: number
   prev_close: number | null
-  unit: 'pt' | 'KRW' | '%'
+  unit: 'pt' | 'KRW' | '%' | 'USD'
   value_date: string // YYYY-MM-DD, the trading day the value belongs to
   source: 'kis' | 'yahoo'
 }
@@ -36,7 +36,7 @@ export const BONDS: Spec[] = [
 
 const isoDate = (ymd: string) => `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`
 // KIS sends some values with float noise ("1344.2999" for 1344.3): rounded to the unit's precision
-const DECIMALS: Record<Quote['unit'], number> = { pt: 2, KRW: 2, '%': 3 }
+const DECIMALS: Record<Quote['unit'], number> = { pt: 2, KRW: 2, '%': 3, USD: 2 }
 const round = (v: number | null, unit: Quote['unit']) => v == null ? null : Number(v.toFixed(DECIMALS[unit]))
 
 // deno-lint-ignore no-explicit-any

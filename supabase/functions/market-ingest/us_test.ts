@@ -4,7 +4,7 @@
 // Run from the repo root: deno task test
 
 import { assertEquals } from 'jsr:@std/assert@1.0.19'
-import { FIXED_ETFS, marketQuoteOf, toYahoo, trackedTickers, US_INDICES, US_YIELDS, usQuoteOf } from './us.ts'
+import { FIXED_ETFS, GLOBAL, marketQuoteOf, toYahoo, trackedTickers, US_INDICES, US_YIELDS, usQuoteOf } from './us.ts'
 
 const FILE = new URL('./fixtures/yahoo_quote_20261126_1426.json', import.meta.url)
 const HAVE = (() => {
@@ -51,6 +51,17 @@ Deno.test('tracked: mentioned and listed first, then the fixed ETFs, each once; 
   assertEquals(t.length, 3 + FIXED_ETFS.length - 1) // SPY counted once
   assertEquals(t.some((x) => x.ticker === 'ANTHROPIC'), false)
   assertEquals(t.filter((x) => x.because === 'etf').map((x) => x.ticker), FIXED_ETFS.filter((e) => e !== 'SPY'))
+})
+
+Deno.test('gold, silver, Bitcoin: USD, 2 decimals, kind commodity / crypto (values from 11-26 14:50 KST)', () => {
+  const q = (price: number, prev: number) => ({ regularMarketPrice: price, regularMarketPreviousClose: prev, regularMarketTime: new Date('2026-11-26T05:50:35Z') })
+  assertEquals(GLOBAL.map((g) => g.yahoo), ['GC=F', 'SI=F', 'BTC-USD'])
+  assertEquals(marketQuoteOf(q(3607, 3564.6), GLOBAL[0], 'commodity'), {
+    symbol: 'GOLD', kind: 'commodity', name: '금 선물 (COMEX 근월물)', price: 3607, prev_close: 3564.6, unit: 'USD', value_date: '2026-11-26', source: 'yahoo',
+  })
+  assertEquals(marketQuoteOf(q(41.89, 40.538), GLOBAL[1], 'commodity')!.prev_close, 40.54)
+  const btc = marketQuoteOf(q(60671.2345, 60378.57), GLOBAL[2], 'crypto')!
+  assertEquals([btc.kind, btc.unit, btc.price], ['crypto', 'USD', 60671.23])
 })
 
 Deno.test('market time as Date, epoch seconds or ISO string; no price or time = no row', () => {

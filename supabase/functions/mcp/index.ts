@@ -696,13 +696,15 @@ const handler = createMcpHandler((ctx) => {
   server.registerTool(
     'get_market_overview',
     {
-      title: '시장 지표 (한국·미국 지수, 환율, 국채 금리)',
+      title: '시장 지표 (한국·미국 지수, 환율, 국채 금리, 금·은·비트코인)',
       description:
         'Latest market indicators, one value each (no history). Korea (KIS): KOSPI and KOSDAQ (real time during the ' +
         '09:00–15:30 KST session, refreshed every 5 minutes), 원/달러 KRW per USD (real time 09:00–02:00 KST, every 5 ' +
         'minutes), 국고채 1/3/5/10/20/30-year yields (once a day, the day\'s final value, fetched at 18:30 KST). ' +
         'US (Yahoo Finance, every 5 minutes during the US session, ~22:00–07:00 KST): S&P 500, Dow, Nasdaq Composite, ' +
         'SOX (real time), Russell 2000 and VIX (15 min delayed), Treasury 13-week/5/10/30-year yields (15 min delayed). ' +
+        'Gold and silver (COMEX front-month futures, USD per troy ounce, 10 min delayed) and Bitcoin (USD, real time), ' +
+        'every 10 minutes around the clock (Yahoo Finance). ' +
         'Each row has the value, the previous close, the change (index points or won; basis points for yields), ' +
         'value_date (the trading day the value belongs to, in that market\'s time zone) and as_of (when it was fetched). ' +
         'The BOK base rate isn\'t collected.',
@@ -715,7 +717,7 @@ const handler = createMcpHandler((ctx) => {
       if (error) throw new Error(error.message)
       const order = [
         'KOSPI', 'KOSDAQ', 'SPX', 'DJI', 'IXIC', 'RUT', 'SOX', 'VIX', 'USDKRW',
-        'KR1Y', 'KR3Y', 'KR5Y', 'KR10Y', 'KR20Y', 'KR30Y', 'US13W', 'US5Y', 'US10Y', 'US30Y',
+        'KR1Y', 'KR3Y', 'KR5Y', 'KR10Y', 'KR20Y', 'KR30Y', 'US13W', 'US5Y', 'US10Y', 'US30Y', 'GOLD', 'SILVER', 'BTC',
       ]
       const rows = (data ?? []).sort((a, b) => (order.indexOf(a.symbol) + 1 || 99) - (order.indexOf(b.symbol) + 1 || 99))
       const kst = (t: string) => new Date(Date.parse(t) + 9 * 3600_000).toISOString().slice(0, 16).replace('T', ' ') + ' KST'
@@ -746,6 +748,8 @@ const handler = createMcpHandler((ctx) => {
         fx: rows.filter((r) => r.kind === 'fx').map(row),
         kr_government_bonds: rows.filter((r) => r.kind === 'rate' && !us(r)).map(row),
         us_treasury_yields: rows.filter((r) => r.kind === 'rate' && us(r)).map(row),
+        commodities: rows.filter((r) => r.kind === 'commodity').map(row),
+        crypto: rows.filter((r) => r.kind === 'crypto').map(row),
         ...(rows.length ? {} : { note: 'No market data collected yet.' }),
       })
     },

@@ -340,8 +340,8 @@ test('get_market_overview: KR / US indices, KRW/USD and yields with changes; emp
   await admin.from('market_quotes').delete().neq('symbol', '')
   const empty = await call('get_market_overview')
   assertEquals(
-    [empty.kr_indices, empty.us_indices, empty.fx, empty.kr_government_bonds, empty.us_treasury_yields, empty.note],
-    [[], [], [], [], [], 'No market data collected yet.'],
+    [empty.kr_indices, empty.us_indices, empty.fx, empty.kr_government_bonds, empty.us_treasury_yields, empty.commodities, empty.crypto, empty.note],
+    [[], [], [], [], [], [], [], 'No market data collected yet.'],
   )
 
   const at = '2026-11-26T04:10:00Z' // 13:10 KST
@@ -355,6 +355,8 @@ test('get_market_overview: KR / US indices, KRW/USD and yields with changes; emp
     q('US10Y', 'rate', '미국 10년 국채', 4.848, 4.904, '%', 'yahoo'),
     q('DJI', 'index', 'Dow Jones Industrial Average', 50182.95, 50018.7, 'pt', 'yahoo'),
     q('SPX', 'index', 'S&P 500', 7182.78, 7201.09, 'pt', 'yahoo'),
+    q('BTC', 'crypto', 'Bitcoin', 60671.23, 60378.57, 'USD', 'yahoo'),
+    q('GOLD', 'commodity', '금 선물 (COMEX 근월물)', 3607, 3564.6, 'USD', 'yahoo'),
   ])
   if (ins.error) throw new Error(ins.error.message)
   try {
@@ -364,6 +366,8 @@ test('get_market_overview: KR / US indices, KRW/USD and yields with changes; emp
     assertEquals([r.us_indices[0].change, r.us_indices[0].change_pct], [-18.31, -0.25])
     assertEquals(r.us_treasury_yields.map((x: Json) => [x.symbol, x.change_bp]), [['US10Y', -5.6]])
     assertEquals(r.kr_government_bonds.map((x: Json) => x.symbol), ['KR10Y'])
+    assertEquals([r.commodities[0].symbol, r.commodities[0].unit, r.commodities[0].change, r.commodities[0].change_pct], ['GOLD', 'USD', 42.4, 1.19])
+    assertEquals([r.crypto[0].symbol, r.crypto[0].change], ['BTC', 292.66])
     assertEquals(r.kr_indices[0], {
       symbol: 'KOSPI', name: 'KOSPI', value: 4757.43, unit: 'pt', prev_close: 4697.51, change: 59.92, change_pct: 1.28,
       value_date: '2026-11-26', as_of: '2026-11-26 13:10 KST',

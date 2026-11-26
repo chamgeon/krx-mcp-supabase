@@ -154,9 +154,9 @@ async function market(env: Record<string, string>) {
 
 async function yahoo() {
   const { default: YahooFinance } = await import('jsr:@gadicc/yahoo-finance2@4.0.5')
-  const { US_INDICES, US_YIELDS } = await import('../supabase/functions/market-ingest/us.ts')
-  // Indices, yields, Nasdaq and NYSE stocks, a class share (BRK.B → BRK-B), ETFs, and a ticker that doesn't exist
-  const symbols = [...US_INDICES, ...US_YIELDS].map((s) => s.yahoo).concat(['NVDA', 'ORCL', 'BRK-B', 'SPY', 'SOXL', 'ZZZZZQ'])
+  const { GLOBAL, US_INDICES, US_YIELDS } = await import('../supabase/functions/market-ingest/us.ts')
+  // Indices, yields, gold / silver / Bitcoin, Nasdaq and NYSE stocks, a class share (BRK.B → BRK-B), ETFs, and a ticker that doesn't exist
+  const symbols = [...US_INDICES, ...US_YIELDS, ...GLOBAL].map((s) => s.yahoo).concat(['NVDA', 'ORCL', 'BRK-B', 'SPY', 'SOXL', 'ZZZZZQ'])
   const yf = new YahooFinance({ suppressNotices: ['yahooSurvey'] })
   const quotes = await yf.quote(symbols, {}, { validateResult: false })
   const stamp = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '_')

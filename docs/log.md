@@ -1025,7 +1025,7 @@ What was done and why. Oldest first; new entries go at the bottom.
   Local: `check`, `test` (177), `test:db` (43), `test:mcp` (53) pass; `market-ingest` run end to end locally against
   KIS stored all 9 symbols.
 
-## 2026-11-26 — US market data from Yahoo Finance (yahoo-finance2; built, not deployed)
+## 2026-11-26 — US market data from Yahoo Finance (yahoo-finance2; deployed the same day)
 - **Decided:** Yahoo Finance through yahoo-finance2 (Deno / JSR, `jsr:@gadicc/yahoo-finance2@4.0.5`) for the US side;
   KIS stays for Korean data only. **Why:** it has every index we wanted as real values (KIS has no Dow or Russell 2000,
   Alpaca no index values at all), the yields, and any stock, and one quote() call takes 1,000 symbols (11-26: 1,000
@@ -1052,7 +1052,7 @@ What was done and why. Oldest first; new entries go at the bottom.
   back as `not_tracked` (listed, not mentioned lately) or `unknown` (not in `us_symbols`, which has almost no ETFs).
   Price lookup only; no live Yahoo call from the tool. `test:mcp` 54 pass.
 
-## 2026-11-26 — market-ingest alerts per set, and a markets line in the daily report (built, not deployed)
+## 2026-11-26 — market-ingest alerts per set, and a markets line in the daily report (deployed the same day)
 - **Why:** the three sets were one job (`market-ingest`), so one hourly alert throttle: between 22:00 and 02:00 KST a
   `live` failure silenced a `us` one for an hour, and the other way round. And nothing flagged a set that stopped
   running (the report checks this only for kis-ingest, krx-ingest and telegram-ingest).
@@ -1063,6 +1063,16 @@ What was done and why. Oldest first; new entries go at the bottom.
   was a weekday) or ran without one success. Not covered: a few stocks missing from Yahoo's answer (only in the run's
   `missing`), stale values without an error. `test` 184, `test:db` 43 pass.
 - **Deploy:** `market-ingest` and `pipeline-report`.
+
+## 2026-11-26 — Gold, silver, Bitcoin (Yahoo; deployed the same day)
+- **Found (11-26 14:50 KST):** Yahoo has gold and silver only as COMEX front-month futures (`GC=F` 3,607, `SI=F` 41.89,
+  10 min delayed, updating in Korean daytime); spot `XAUUSD=X`, `XAGUSD=X`, `XAU=X` return nothing. Bitcoin `BTC-USD`
+  real time, 24/7.
+- **Done:** migration `20261126000003_market_quotes_commodities.sql` (kinds `commodity`, `crypto`; unit `USD`);
+  `market-ingest ?set=global` (GOLD, SILVER, BTC into `market_quotes`; job `market-ingest-global`); cron in
+  `sql/cron.example.sql` every 10 min, every day (they trade outside US stock hours); `get_market_overview` sections
+  `commodities` and `crypto`; the report expects the job every day. `test` 185, `test:db` 43, `test:mcp` 54 pass; run
+  locally against Yahoo (GOLD 3609.5, SILVER 41.98, BTC 60573.26).
 
 ## Open
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
@@ -1090,19 +1100,15 @@ What was done and why. Oldest first; new entries go at the bottom.
   knee and the first bottleneck (Postgres connections or compute, PostgREST, Edge workers, the forward hop), using
   the per-step `timings`. Database-backed read-only tools only, outside the session (no KIS or t.me calls), via the
   operator key (unlogged); short runs, within free-plan fair use. Framed as knowing the limits, not as needing scale.
-- 11-30: check the `live_prices` cleanup (no day older than 10 days).
-- `market-ingest` (deployed 11-26: migration, `market-ingest` v1, `mcp` v63, cron jobs `market-ingest-live` and
-  `market-ingest-bonds`; first run 14:01 KST ok, 1.6 s, 3 symbols). Check: KRW/USD keeps updating in the evening session
-  (15:30–02:00 KST; only the daytime was probed), and the 18:30 bonds value is the day's final one.
-- US market data (deployed 11-26; first manual `?set=us` run from Seoul at 14:38 KST: 200 in 8.2 s, all 10 market rows
-  and 651 of 651 tickers, no 429). Delays stored: 9 real time (Arca ETFs), 301 at 15 min (Nasdaq), 341 at 20 (NYSE).
-  Cron `market-ingest-us` added 11-26 (first scheduled run 22:03 KST). Watch `ingest_runs` for 429s over a full US
-  session (one run proves little); Monday 11-30 is the first full one (11-27 is a half day).
-  Still open: BOK base rate (ECOS key), US 2Y (Treasury.gov daily).
-- `screen_stocks` window cap (11-26, built, not deployed): deploy `mcp`, then check that `avg_days: 61` is
-  rejected. After that, watch `tool_calls` for `screen_stocks` timeouts.
-- Telegram gate, after deploy: watch the backlog drain (`gate.left` in telegram-ingest's `ingest_runs` summary), the
-  failure count, and the first `us_symbols` refresh; spot-check hidden noise with `include_noise: true`.
+- 11-30: check the `live_prices` cleanup (no day older than 10 days; on 11-26 the oldest was 11-19).
+- Markets (`market-ingest`, deployed 11-26):
+  - Deployed 11-26 with gold / silver / Bitcoin, the per-set jobs and the report's markets line; cron
+    `market-ingest-global` added (every 10 min). Check the first 18:00 report's `Markets` line (11-27).
+  - KRW/USD in the evening session (15:30–02:00 KST): only the daytime was probed as real time.
+  - 국고채 at 18:30: check the stored value is the day's final one (KIS had an intraday value at 13:11).
+  - US (`market-ingest-us`, cron from 11-26 22:03 KST): watch `ingest_runs` for Yahoo 429s over a full session;
+    Monday 11-30 is the first (11-27 is a half day). Only one manual run so far (11-26 14:38, 651/651, no 429).
+  - Not collected yet: BOK base rate (needs an ECOS key), US 2Y (Treasury.gov's daily curve, no key).
 - Normalized chunks for Telegram posts (dropped from Phase 2 on 11-19, needed after all): posts stored as clean,
   non-clipped pieces (a digest split by topic), so a filtered feed returns the relevant part instead of a post's
   opening. The size problem it would solve, measured on `get_telegram_feed(event: anthropic-ipo)` (77 posts,
@@ -1112,10 +1118,6 @@ What was done and why. Oldest first; new entries go at the bottom.
   (snippet around the query word), but only matches one spelling (앤스로픽 or Anthropic-only posts drop out). Kept
   as-is for now. Open: how to split (the formatting differs a lot by channel: headings, bullets, prose), and what the
   feed counts (posts or chunks).
-- YouTube: ingest deployed 11-20 (4 channels, job 19 every 5 min; first run 15:12 KST, 20 videos). Next: gate the
-  transcripts (label, stock and event tags, as for Telegram posts; a live stream's 80k+ characters needs chunks or
-  a summary first), and a YouTube line in the daily report. MCP tools: deploy `mcp` after `supabase db push --remote`
-  (migration 20261120000001).
-- X: deployed with 4 accounts (Bilello, Bespoke, SentimenTrader, Liz Ann Sonders). Gate: deploy migration
-  `20261120000004`, x-ingest and mcp, then check the first gated posts.
+- YouTube: gate the transcripts (label, stock and event tags, as for Telegram posts; a live stream's 80k+ characters
+  needs chunks or a summary first), and a YouTube line in the daily report.
 - Thesis tracking (plan.md → Phase 4): build 4.1 (tables, thesis tools, `add_event`).

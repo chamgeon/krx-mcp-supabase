@@ -32,6 +32,8 @@
 --               Yahoo Finance: US indices and Treasury yields (market_quotes), and the US tickers mentioned in posts
 --               in the last 90 days plus fixed ETFs (us_quotes). Covers the US session in both winter (23:30–06:00 KST)
 --               and summer time (22:30–05:00 KST); off-session runs just rewrite the last close.
+--   market-ingest  ?set=global  every 10 min (7 min past), daily
+--               Yahoo Finance: gold and silver (COMEX front-month futures) and Bitcoin, into market_quotes.
 --   pipeline-report  18:00 KST          (09:00 UTC)              daily
 --               Telegram report of the last 24 h of ingest runs (needs the TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
 --               secrets). Already set up? Add only this job.
@@ -191,6 +193,19 @@ select cron.schedule(
   $$
 );
 
+select cron.schedule(
+  'market-ingest-global',
+  '7-57/10 * * * *',
+  $$
+  select net.http_post(
+    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/market-ingest?set=global',
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-region', 'ap-northeast-2', 'x-ingest-secret', '<INGEST_SECRET>'),
+    body := '{}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $$
+);
+
 -- Ingest runs:  select * from ingest_runs order by started_at desc limit 20;
 -- Check runs:   select * from cron.job_run_details order by start_time desc limit 10;
 -- HTTP results: select * from net._http_response order by created desc limit 10;
@@ -205,3 +220,4 @@ select cron.schedule(
 --               select cron.unschedule('market-ingest-live');
 --               select cron.unschedule('market-ingest-bonds');
 --               select cron.unschedule('market-ingest-us');
+--               select cron.unschedule('market-ingest-global');

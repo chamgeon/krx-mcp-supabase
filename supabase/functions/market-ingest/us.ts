@@ -22,6 +22,14 @@ export const US_YIELDS: Spec[] = [
   { symbol: 'US10Y', yahoo: '^TNX', name: '미국 10년 국채' },
   { symbol: 'US30Y', yahoo: '^TYX', name: '미국 30년 국채' },
 ]
+// ?set=global, every 10 min, every day (they trade outside US stock hours): gold and silver as COMEX front-month
+// futures (Yahoo has no spot gold / silver; 10 min delayed), Bitcoin (real time, 24/7). USD per troy ounce / per coin.
+export const GLOBAL: (Spec & { kind: 'commodity' | 'crypto' })[] = [
+  { symbol: 'GOLD', yahoo: 'GC=F', name: '금 선물 (COMEX 근월물)', kind: 'commodity' },
+  { symbol: 'SILVER', yahoo: 'SI=F', name: '은 선물 (COMEX 근월물)', kind: 'commodity' },
+  { symbol: 'BTC', yahoo: 'BTC-USD', name: 'Bitcoin', kind: 'crypto' },
+]
+
 // Always tracked, mentioned or not: broad market, Nasdaq 100, Dow, small caps, semiconductors, tech, long Treasuries,
 // gold, and the leveraged ETFs Korean retail trades most. Edit freely; us_symbols has (almost) no ETFs.
 export const FIXED_ETFS = ['SPY', 'VOO', 'QQQ', 'DIA', 'IWM', 'SOXX', 'SMH', 'XLK', 'TLT', 'GLD', 'TQQQ', 'SOXL']
@@ -54,14 +62,17 @@ const timeOf = (q: YQuote): Date | null => {
   return Number.isNaN(d.getTime()) ? null : d
 }
 
-/** A Yahoo quote of an index or a yield as a market_quotes row; null without a price or time. */
-export function marketQuoteOf(q: YQuote | undefined, spec: Spec, kind: 'index' | 'rate'): Quote | null {
-  const price = round(q?.regularMarketPrice, kind === 'rate' ? 3 : 2)
+const UNIT: Record<'index' | 'rate' | 'commodity' | 'crypto', Quote['unit']> = { index: 'pt', rate: '%', commodity: 'USD', crypto: 'USD' }
+
+/** A Yahoo quote of an index, a yield, a commodity or a coin as a market_quotes row; null without a price or time. */
+export function marketQuoteOf(q: YQuote | undefined, spec: Spec, kind: 'index' | 'rate' | 'commodity' | 'crypto'): Quote | null {
+  const d = kind === 'rate' ? 3 : 2
+  const price = round(q?.regularMarketPrice, d)
   const t = q && timeOf(q)
   if (price == null || !t) return null
   return {
-    symbol: spec.symbol, kind, name: spec.name, price, prev_close: round(q!.regularMarketPreviousClose, kind === 'rate' ? 3 : 2),
-    unit: kind === 'rate' ? '%' : 'pt', value_date: nyDate.format(t), source: 'yahoo',
+    symbol: spec.symbol, kind, name: spec.name, price, prev_close: round(q!.regularMarketPreviousClose, d),
+    unit: UNIT[kind], value_date: nyDate.format(t), source: 'yahoo',
   }
 }
 
