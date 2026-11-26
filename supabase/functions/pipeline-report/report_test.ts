@@ -2,7 +2,7 @@
 // Run from the repo root: deno task test
 
 import { assert, assertEquals, assertStringIncludes } from 'jsr:@std/assert@1.0.19'
-import { buildReport, gateReport, reportWindowEnd, type Run } from './report.ts'
+import { buildReport, gateReport, marketReport, reportWindowEnd, type Run } from './report.ts'
 
 const END = new Date('2026-11-17T09:00:00Z') // Tue 18:00 KST
 const at = (kst: string) => new Date(`2026-11-17T${kst}:00+09:00`).toISOString()
@@ -16,9 +16,17 @@ const krx: Run = {
   summary: { targets: ['20261116', '20261117'], results: { '20261116': 2789, '20261117': 0 } },
 }
 const tg = (newPosts: number): Run => ({ job: 'telegram-ingest', started_at: at('10:00'), ok: true, error: null, summary: { new_posts: newPosts } })
+const mk = (set: string, iso: string, ok = true, summary: object = {}): Run =>
+  ({ job: `market-ingest-${set}`, started_at: new Date(iso).toISOString(), ok, error: ok ? null : 'x', summary })
+// The window (Mon 18:00 → Tue 18:00 KST): live through the day, bonds Mon 18:30, US Mon night → Tue morning
+const markets = [
+  mk('live', '2026-11-17T09:01:00+09:00'), mk('live', '2026-11-17T17:56:00+09:00'),
+  mk('bonds', '2026-11-16T18:30:00+09:00'),
+  mk('us', '2026-11-17T05:03:00+09:00', true, { stored: 650 }), mk('us', '2026-11-17T06:58:00+09:00', true, { stored: 651 }),
+]
 const healthy = {
   end: END,
-  runs: [krx, kis('09:05'), kis('15:40'), kis('16:00'), tg(3), tg(2)],
+  runs: [krx, kis('09:05'), kis('15:40'), kis('16:00'), tg(3), tg(2), ...markets],
   pendingKrxDays: [],
   krxLatest: { bas_dd: '2026-11-16', row_count: 2789 },
   channelErrors: [],
@@ -35,6 +43,7 @@ Deno.test('a healthy trading day', () => {
     '✅ KIS: 3 snapshots today, last 16:00 (2,771 stocks)',
     '✅ KRX official: latest 11-16 (2,789 stocks), loaded 11-16',
     '✅ Telegram: 2 polls, 5 new posts',
+    '✅ Markets: KR 2 runs, last 17:56; KR bonds 18:30; US 2 runs, last 06:58, 651 stocks',
     '✅ No failed runs since yesterday 18:00',
   ].join('\n'))
 })
@@ -78,6 +87,22 @@ Deno.test('jobs that never ran are flagged', () => {
   const text = buildReport({ ...healthy, runs: [kis('15:40')] })
   assertStringIncludes(text, "❌ KRX: krx-ingest didn't run (07:00–08:30)")
   assertStringIncludes(text, "❌ Telegram: telegram-ingest didn't run")
+  assertStringIncludes(text, "❌ Markets: market-ingest-live didn't run; market-ingest-bonds didn't run; market-ingest-us didn't run")
+})
+
+Deno.test('markets: a set with only failed runs is flagged, the others listed as ok', () => {
+  const runs = [...markets.filter((r) => r.job !== 'market-ingest-us'), mk('us', '2026-11-17T05:03:00+09:00', false), mk('us', '2026-11-17T05:08:00+09:00', false)]
+  assertEquals(
+    marketReport(runs, 2),
+    '❌ Markets: market-ingest-us: no successful run (2 failed runs) (ok: KR 2 runs, last 17:56; KR bonds 18:30)',
+  )
+})
+
+Deno.test('markets: what each day expects (Sun nothing, Mon live only, Sat all three: Friday night is in the window)', () => {
+  assertEquals(marketReport([], 0), null) // Sunday: Sat 18:00 → Sun 18:00 has no runs
+  assertEquals(marketReport([], 1), "❌ Markets: market-ingest-live didn't run") // Monday: no bonds / US on Sunday
+  assertEquals(marketReport([], 6), "❌ Markets: market-ingest-live didn't run; market-ingest-bonds didn't run; market-ingest-us didn't run")
+  assertEquals(marketReport([mk('live', '2026-11-16T09:01:00+09:00')], 1), '✅ Markets: KR 09:01')
 })
 
 Deno.test('Telegram gate: posts, noise share, tokens and cost over the day; off when no run gated', () => {

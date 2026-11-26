@@ -1,6 +1,7 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@gadicc/yahoo-finance2@4.0.5": "4.0.5",
     "jsr:@std/assert@1.0.19": "1.0.19",
     "jsr:@std/internal@^1.0.12": "1.0.14",
     "jsr:@supabase/functions-js@2.119.0": "2.119.0",
@@ -8,12 +9,21 @@
     "npm:@modelcontextprotocol/client@2.4.0": "2.4.0",
     "npm:@modelcontextprotocol/server@2.4.0": "2.4.0",
     "npm:@supabase/supabase-js@2.119.0": "2.119.0",
+    "npm:@types/json-schema@^7.0.15": "7.0.15",
     "npm:jose@5.10.0": "5.10.0",
     "npm:linkedom@0.18.5": "0.18.5",
     "npm:openai@^4.52.5": "4.104.0_zod@4.6.7",
+    "npm:tough-cookie@^6.0.2": "6.1.0",
     "npm:zod@4.6.7": "4.6.7"
   },
   "jsr": {
+    "@gadicc/yahoo-finance2@4.0.5": {
+      "integrity": "573dd559748169837ff340db2e87342bd252f4bd4ca698a6327de5dbff1f7153",
+      "dependencies": [
+        "npm:@types/json-schema",
+        "npm:tough-cookie"
+      ]
+    },
     "@std/assert@1.0.19": {
       "integrity": "eaada96ee120cb980bc47e040f82814d786fe8162ecc53c91d8df60b8755991e",
       "dependencies": [
@@ -122,6 +132,9 @@
         "@supabase/realtime-js",
         "@supabase/storage-js"
       ]
+    },
+    "@types/json-schema@7.0.15": {
+      "integrity": "sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA=="
     },
     "@types/node-fetch@2.6.13": {
       "integrity": "sha512-QGpRVpzSaUs30JBSGPjOg4Uveu384erbHBoT1zeONvyCfwQxIkUshLAOqN/k9EjGviPRmWTTe6aH2qySWKTVSw==",
@@ -444,6 +457,22 @@
       "dependencies": [
         "@stablelib/base64",
         "fast-sha256"
+      ]
+    },
+    "tldts-core@7.5.5": {
+      "integrity": "sha512-rEJz/8cJFY/bdF354gl14yxavbrIbvM+FcbkYVQ6CSCMQTJdUFUIm39TTWSiGPvcpQh7/F6qHrD3SkwwdgtDCw=="
+    },
+    "tldts@7.5.5": {
+      "integrity": "sha512-Hy6IImaWALzJOgCIss4gIFi4G0M9lqk95pFKCUVxQPZw+biZ1Pv6f28JpYgahpJB+BufA0HYsIU/aP/WIx3KRg==",
+      "dependencies": [
+        "tldts-core"
+      ],
+      "bin": true
+    },
+    "tough-cookie@6.1.0": {
+      "integrity": "sha512-FTxc8u8Kl2tz0Lat1u8ksvcy8bwHRyEMawwTWybo51JqaC6O7SvfuhAKg+Ld6VqyIe2QRJBzY9HA7y2WyFRT2w==",
+      "dependencies": [
+        "tldts"
       ]
     },
     "tr46@0.0.3": {

@@ -1025,6 +1025,45 @@ What was done and why. Oldest first; new entries go at the bottom.
   Local: `check`, `test` (177), `test:db` (43), `test:mcp` (53) pass; `market-ingest` run end to end locally against
   KIS stored all 9 symbols.
 
+## 2026-11-26 — US market data from Yahoo Finance (yahoo-finance2; built, not deployed)
+- **Decided:** Yahoo Finance through yahoo-finance2 (Deno / JSR, `jsr:@gadicc/yahoo-finance2@4.0.5`) for the US side;
+  KIS stays for Korean data only. **Why:** it has every index we wanted as real values (KIS has no Dow or Russell 2000,
+  Alpaca no index values at all), the yields, and any stock, and one quote() call takes 1,000 symbols (11-26: 1,000
+  in 1.6 s; the whole ~7.4k market would be ~8 calls). Unofficial and "personal use only" per yfinance's README; raw
+  requests from the operator's IP got 429 for 10 of 12 on 11-26 while the library's quote() call went through. A
+  throwaway `yahoo-probe` function (to measure 429s from Supabase's IPs) was deployed and deleted unused.
+- **Delays Yahoo states (exchangeDataDelayedBy, 11-26):** S&P 500, Dow, Nasdaq, SOX 0 min; Russell 2000, VIX, yields
+  15; stocks 15–20 (NVDA 15, ORCL and BRK-B 20); ETFs 0 or 15 (SPY, IWM, SOXL 0; QQQ, SOXX, TLT 15). Stored per row
+  in `us_quotes.delay_min`.
+- **Stocks tracked:** not the whole market. The US tickers mentioned in Telegram / X posts in the last 90 days
+  (`us_tickers`, read each run, no schema change), kept only if in `us_symbols` (639 on 11-26: Nasdaq 296 tickers / 65%
+  of mentions, NYSE 341 / 35%, so Nasdaq-only would miss ORCL, LLY, DELL, GS, JPM, ...), plus a fixed ETF list
+  (`FIXED_ETFS` in market-ingest/us.ts: SPY VOO QQQ DIA IWM SOXX SMH XLK TLT GLD TQQQ SOXL; `us_symbols` has almost no
+  ETFs). A ticker that drops out is deleted on the next run. Gate mistakes that are real tickers come along (`ANT`).
+- **Done:** migration `20261126000002_us_quotes.sql`; `market-ingest ?set=us` (indices SPX DJI IXIC RUT SOX VIX and
+  yields US13W US5Y US10Y US30Y into `market_quotes` with source 'yahoo'; stocks into `us_quotes`); cron
+  `market-ingest-us` in `sql/cron.example.sql` (every 5 min 22:03–06:58 KST Mon–Fri, both US summer and winter time);
+  `get_market_overview` split into kr_indices / us_indices / fx / kr_government_bonds / us_treasury_yields;
+  `deno task fixtures yahoo`. Local: `check`, `test` (182), `test:db` (43), `test:mcp` (53) pass; `?set=us` run end to
+  end locally against Yahoo (10 market rows, 12 ETFs; a seeded post's NVDA / BRK.B added, a fake ticker dropped, both
+  removed again once the post was gone).
+- **Then:** MCP tool `get_us_quote(tickers)`: up to 20 stored quotes (price, change, % change, day range, volume, cap,
+  market state, traded_at, delay_min, as_of); accepts `$NVDA`, lowercase and `BRK-B`; tickers without a quote come
+  back as `not_tracked` (listed, not mentioned lately) or `unknown` (not in `us_symbols`, which has almost no ETFs).
+  Price lookup only; no live Yahoo call from the tool. `test:mcp` 54 pass.
+
+## 2026-11-26 — market-ingest alerts per set, and a markets line in the daily report (built, not deployed)
+- **Why:** the three sets were one job (`market-ingest`), so one hourly alert throttle: between 22:00 and 02:00 KST a
+  `live` failure silenced a `us` one for an hour, and the other way round. And nothing flagged a set that stopped
+  running (the report checks this only for kis-ingest, krx-ingest and telegram-ingest).
+- **Done:** `monitored()` (ops.ts) takes the job name from the request when given a function; market-ingest records
+  `market-ingest-live` / `-bonds` / `-us` (runs before this deploy stay as `market-ingest`). pipeline-report:
+  `marketReport` adds `✅ Markets: KR … runs, last …; KR bonds 18:30; US … runs, last …, N stocks`, or `❌ Markets:`
+  naming each set that didn't run when expected (live unless the report day is Sunday; bonds and US when the day before
+  was a weekday) or ran without one success. Not covered: a few stocks missing from Yahoo's answer (only in the run's
+  `missing`), stale values without an error. `test` 184, `test:db` 43 pass.
+- **Deploy:** `market-ingest` and `pipeline-report`.
+
 ## Open
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
   next to the database, every minute) vs. moving the project to us-east-1. A ping every minute would keep workers
@@ -1055,8 +1094,11 @@ What was done and why. Oldest first; new entries go at the bottom.
 - `market-ingest` (deployed 11-26: migration, `market-ingest` v1, `mcp` v63, cron jobs `market-ingest-live` and
   `market-ingest-bonds`; first run 14:01 KST ok, 1.6 s, 3 symbols). Check: KRW/USD keeps updating in the evening session
   (15:30–02:00 KST; only the daytime was probed), and the 18:30 bonds value is the day's final one.
-- US market data (open): US indices (KIS or other), US stocks (own table; KIS condition search or Alpaca), US yields
-  (Treasury.gov daily; intraday unknown), BOK base rate (ECOS key).
+- US market data (deployed 11-26; first manual `?set=us` run from Seoul at 14:38 KST: 200 in 8.2 s, all 10 market rows
+  and 651 of 651 tickers, no 429). Delays stored: 9 real time (Arca ETFs), 301 at 15 min (Nasdaq), 341 at 20 (NYSE).
+  Cron `market-ingest-us` added 11-26 (first scheduled run 22:03 KST). Watch `ingest_runs` for 429s over a full US
+  session (one run proves little); Monday 11-30 is the first full one (11-27 is a half day).
+  Still open: BOK base rate (ECOS key), US 2Y (Treasury.gov daily).
 - `screen_stocks` window cap (11-26, built, not deployed): deploy `mcp`, then check that `avg_days: 61` is
   rejected. After that, watch `tool_calls` for `screen_stocks` timeouts.
 - Telegram gate, after deploy: watch the backlog drain (`gate.left` in telegram-ingest's `ingest_runs` summary), the

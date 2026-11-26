@@ -11,7 +11,7 @@ export type Quote = {
   prev_close: number | null
   unit: 'pt' | 'KRW' | '%'
   value_date: string // YYYY-MM-DD, the trading day the value belongs to
-  source: 'kis'
+  source: 'kis' | 'yahoo'
 }
 
 type Spec = { symbol: string; code: string; name: string }

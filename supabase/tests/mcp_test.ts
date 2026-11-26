@@ -181,7 +181,7 @@ test('tools/list: exactly the expected tools, each described', async () => {
   const { tools } = await (await keyClient()).listTools()
   assertEquals(tools.map((t) => t.name).sort(), [
     'add_telegram_channel', 'analyze_stock', 'check_available_dates', 'find_stock', 'find_us_stock', 'get_daily_movers',
-    'get_market_overview',
+    'get_market_overview', 'get_us_quote',
     'get_my_channels', 'get_stock_history', 'get_telegram_feed', 'list_telegram_channels', 'list_telegram_events',
     'screen_stocks', 'search_telegram', 'set_my_channels', 'update_my_channels',
     'add_youtube_channel', 'get_my_youtube_channels', 'get_youtube_transcript', 'list_youtube_channels', 'list_youtube_videos',
@@ -336,25 +336,35 @@ test('invalid arguments are rejected by the schema, not crashed on', async () =>
 
 // ---- market overview (seeded here: no test reaches KIS) ----------------------------------------------
 
-test('get_market_overview: indices, KRW/USD and bond yields with changes; empty table says so', async () => {
+test('get_market_overview: KR / US indices, KRW/USD and yields with changes; empty table says so', async () => {
   await admin.from('market_quotes').delete().neq('symbol', '')
   const empty = await call('get_market_overview')
-  assertEquals([empty.indices, empty.fx, empty.kr_government_bonds, empty.note], [[], [], [], 'No market data collected yet.'])
+  assertEquals(
+    [empty.kr_indices, empty.us_indices, empty.fx, empty.kr_government_bonds, empty.us_treasury_yields, empty.note],
+    [[], [], [], [], [], 'No market data collected yet.'],
+  )
 
   const at = '2026-11-26T04:10:00Z' // 13:10 KST
-  const q = (symbol: string, kind: string, name: string, price: number, prev: number, unit: string) =>
-    ({ symbol, kind, name, price, prev_close: prev, unit, value_date: '2026-11-26', fetched_at: at })
+  const q = (symbol: string, kind: string, name: string, price: number, prev: number, unit: string, source = 'kis') =>
+    ({ symbol, kind, name, price, prev_close: prev, unit, value_date: '2026-11-26', source, fetched_at: at })
   const ins = await admin.from('market_quotes').insert([
     q('KR10Y', 'rate', '국고채 10년', 3.816, 3.761, '%'),
     q('USDKRW', 'fx', '원/달러', 1342.9, 1344.3, 'KRW'),
     q('KOSDAQ', 'index', 'KOSDAQ', 663.54, 650.64, 'pt'),
     q('KOSPI', 'index', 'KOSPI', 4757.43, 4697.51, 'pt'),
+    q('US10Y', 'rate', '미국 10년 국채', 4.848, 4.904, '%', 'yahoo'),
+    q('DJI', 'index', 'Dow Jones Industrial Average', 50182.95, 50018.7, 'pt', 'yahoo'),
+    q('SPX', 'index', 'S&P 500', 7182.78, 7201.09, 'pt', 'yahoo'),
   ])
   if (ins.error) throw new Error(ins.error.message)
   try {
     const r = await call('get_market_overview')
-    assertEquals(r.indices.map((x: Json) => x.symbol), ['KOSPI', 'KOSDAQ']) // fixed order, not insert order
-    assertEquals(r.indices[0], {
+    assertEquals(r.kr_indices.map((x: Json) => x.symbol), ['KOSPI', 'KOSDAQ']) // fixed order, not insert order
+    assertEquals(r.us_indices.map((x: Json) => x.symbol), ['SPX', 'DJI'])
+    assertEquals([r.us_indices[0].change, r.us_indices[0].change_pct], [-18.31, -0.25])
+    assertEquals(r.us_treasury_yields.map((x: Json) => [x.symbol, x.change_bp]), [['US10Y', -5.6]])
+    assertEquals(r.kr_government_bonds.map((x: Json) => x.symbol), ['KR10Y'])
+    assertEquals(r.kr_indices[0], {
       symbol: 'KOSPI', name: 'KOSPI', value: 4757.43, unit: 'pt', prev_close: 4697.51, change: 59.92, change_pct: 1.28,
       value_date: '2026-11-26', as_of: '2026-11-26 13:10 KST',
     })
@@ -364,6 +374,35 @@ test('get_market_overview: indices, KRW/USD and bond yields with changes; empty 
     assertEquals(r.note, undefined)
   } finally {
     await admin.from('market_quotes').delete().neq('symbol', '')
+  }
+})
+
+test('get_us_quote: stored quotes with change; $/lowercase/BRK-B accepted; not tracked vs unknown', async () => {
+  const T = ['ZZTA', 'ZZT.B', 'ZZTC'] // test-only tickers: two quoted, one listed but untracked
+  await admin.from('us_quotes').delete().in('ticker', T)
+  await admin.from('us_symbols').delete().in('ticker', T)
+  const sym = await admin.from('us_symbols').insert(T.map((t) => ({ ticker: t, name: `Test ${t}`, exchange: 'NASDAQ' })))
+  if (sym.error) throw new Error(sym.error.message)
+  const row = (ticker: string, price: number, prev: number, delay: number) => ({
+    ticker, name: `Test ${ticker}`, exchange: 'NasdaqGS', quote_type: 'EQUITY', price, prev_close: prev, open: prev, high: price,
+    low: prev, volume: 1000, market_cap: 5e9, market_state: 'CLOSED', market_time: '2026-11-25T21:00:01Z',
+    value_date: '2026-11-25', delay_min: delay, tracked_because: 'mentioned', fetched_at: '2026-11-26T05:00:00Z',
+  })
+  const ins = await admin.from('us_quotes').insert([row('ZZTA', 149.3, 155.38, 15), row('ZZT.B', 579.32, 577.21, 20)])
+  if (ins.error) throw new Error(ins.error.message)
+  try {
+    const r = await call('get_us_quote', { tickers: ['$zzta', 'ZZT-B', 'ZZTC', 'NOPE1', 'zzta'] })
+    assertEquals(r.quotes.map((q: Json) => q.ticker), ['ZZTA', 'ZZT.B']) // asked order, each once
+    assertEquals(
+      [r.quotes[0].price, r.quotes[0].change, r.quotes[0].change_pct, r.quotes[0].delay_min, r.quotes[0].traded_at, r.quotes[0].as_of],
+      [149.3, -6.08, -3.91, 15, '2026-11-26 06:00 KST', '2026-11-26 14:00 KST'],
+    )
+    assertEquals([r.not_tracked, r.unknown], [['ZZTC'], ['NOPE1']])
+    const all = await call('get_us_quote', { tickers: ['ZZTA'] })
+    assertEquals([all.quotes.length, all.not_tracked, all.note], [1, undefined, undefined])
+  } finally {
+    await admin.from('us_quotes').delete().in('ticker', T)
+    await admin.from('us_symbols').delete().in('ticker', T)
   }
 })
 

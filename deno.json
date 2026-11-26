@@ -5,7 +5,7 @@
     "check": "deno check supabase/functions/kis-ingest/index.ts supabase/functions/krx-ingest/index.ts supabase/functions/market-ingest/index.ts supabase/functions/mcp/index.ts supabase/functions/pipeline-report/index.ts supabase/functions/telegram-ingest/index.ts supabase/functions/youtube-ingest/index.ts supabase/functions/x-ingest/index.ts scripts/bench.ts scripts/bench_cold.ts scripts/fetch_fixtures.ts scripts/tg_gate.ts",
     "test:db": "deno test --allow-env --allow-read=supabase --allow-net=127.0.0.1,localhost supabase/tests/db_test.ts",
     "test:mcp": "deno test --allow-env --allow-net=127.0.0.1,localhost supabase/tests/mcp_test.ts",
-    "fixtures": "deno run --allow-read=supabase --allow-write=supabase/functions --allow-net=data-dbg.krx.co.kr,openapi.koreainvestment.com:9443,t.me scripts/fetch_fixtures.ts",
+    "fixtures": "deno run --allow-read=supabase --allow-write=supabase/functions --allow-net=data-dbg.krx.co.kr,openapi.koreainvestment.com:9443,t.me,jsr.io,fc.yahoo.com,query1.finance.yahoo.com,query2.finance.yahoo.com,finance.yahoo.com,guce.yahoo.com,consent.yahoo.com --allow-env scripts/fetch_fixtures.ts",
     "bench": "deno run --allow-read=supabase --allow-write=bench-results --allow-net=rtwqklwmvvgtzqjsdhna.supabase.co --allow-env scripts/bench.ts",
     "tg-gate": "deno run --allow-env --allow-sys=uid --allow-read=experiments,scripts,$HOME/.config/anthropic --allow-write=experiments --allow-net=api.anthropic.com,www.nasdaqtrader.com --allow-run=supabase scripts/tg_gate.ts",
     "bench:cold": "deno run --allow-read=supabase --allow-write=bench-results --allow-net=rtwqklwmvvgtzqjsdhna.supabase.co --allow-env scripts/bench_cold.ts"

@@ -102,12 +102,14 @@ type MonitorOptions = {
  * failure is only logged; if the running row couldn't be written, the outcome is inserted at the end instead.
  */
 export function monitored(
-  job: string,
+  job: string | ((req: Request) => string), // a function: the job name depends on the request (market-ingest's ?set=)
   supabase: SupabaseClient,
   handler: MonitoredHandler,
   opts: MonitorOptions = {},
 ): Handler {
+  const jobOf = typeof job === 'function' ? job : () => job
   return async (req) => {
+    const job = jobOf(req)
     const startedAt = new Date()
     const t0 = performance.now()
     const [id] = await Promise.all([

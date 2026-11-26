@@ -28,6 +28,10 @@
 --               into market_quotes (one row per symbol, overwritten).
 --   market-ingest  ?set=bonds  18:30 KST  (09:30 UTC)  Mon–Fri
 --               국고채 1/3/5/10/20/30년 yields, the day's final value.
+--   market-ingest  ?set=us  every 5 min (3 min after kis-ingest), 22:03–06:58 KST  (13–21 UTC)  Mon–Fri
+--               Yahoo Finance: US indices and Treasury yields (market_quotes), and the US tickers mentioned in posts
+--               in the last 90 days plus fixed ETFs (us_quotes). Covers the US session in both winter (23:30–06:00 KST)
+--               and summer time (22:30–05:00 KST); off-session runs just rewrite the last close.
 --   pipeline-report  18:00 KST          (09:00 UTC)              daily
 --               Telegram report of the last 24 h of ingest runs (needs the TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
 --               secrets). Already set up? Add only this job.
@@ -174,6 +178,19 @@ select cron.schedule(
   $$
 );
 
+select cron.schedule(
+  'market-ingest-us',
+  '3-58/5 13-21 * * 1-5',
+  $$
+  select net.http_post(
+    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/market-ingest?set=us',
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-region', 'ap-northeast-2', 'x-ingest-secret', '<INGEST_SECRET>'),
+    body := '{}'::jsonb,
+    timeout_milliseconds := 60000
+  );
+  $$
+);
+
 -- Ingest runs:  select * from ingest_runs order by started_at desc limit 20;
 -- Check runs:   select * from cron.job_run_details order by start_time desc limit 10;
 -- HTTP results: select * from net._http_response order by created desc limit 10;
@@ -187,3 +204,4 @@ select cron.schedule(
 --               select cron.unschedule('pipeline-report');
 --               select cron.unschedule('market-ingest-live');
 --               select cron.unschedule('market-ingest-bonds');
+--               select cron.unschedule('market-ingest-us');

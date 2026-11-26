@@ -696,22 +696,27 @@ const handler = createMcpHandler((ctx) => {
   server.registerTool(
     'get_market_overview',
     {
-      title: '시장 지표 (지수·환율·국고채)',
+      title: '시장 지표 (한국·미국 지수, 환율, 국채 금리)',
       description:
-        'Latest Korean market indicators, one value each (no history): KOSPI and KOSDAQ (real time during the ' +
+        'Latest market indicators, one value each (no history). Korea (KIS): KOSPI and KOSDAQ (real time during the ' +
         '09:00–15:30 KST session, refreshed every 5 minutes), 원/달러 KRW per USD (real time 09:00–02:00 KST, every 5 ' +
-        'minutes), and 국고채 1/3/5/10/20/30-year yields (once a day, the day\'s final value, fetched at 18:30 KST). ' +
+        'minutes), 국고채 1/3/5/10/20/30-year yields (once a day, the day\'s final value, fetched at 18:30 KST). ' +
+        'US (Yahoo Finance, every 5 minutes during the US session, ~22:00–07:00 KST): S&P 500, Dow, Nasdaq Composite, ' +
+        'SOX (real time), Russell 2000 and VIX (15 min delayed), Treasury 13-week/5/10/30-year yields (15 min delayed). ' +
         'Each row has the value, the previous close, the change (index points or won; basis points for yields), ' +
-        'value_date (the trading day the value belongs to) and as_of (when it was fetched). US indices, US yields and ' +
-        'the BOK base rate aren\'t collected yet.',
+        'value_date (the trading day the value belongs to, in that market\'s time zone) and as_of (when it was fetched). ' +
+        'The BOK base rate isn\'t collected.',
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
     },
     async () => {
       const { data, error } = await step('market_quotes', supabase.from('market_quotes')
-        .select('symbol, kind, name, price, prev_close, unit, value_date, fetched_at'))
+        .select('symbol, kind, name, price, prev_close, unit, value_date, source, fetched_at'))
       if (error) throw new Error(error.message)
-      const order = ['KOSPI', 'KOSDAQ', 'USDKRW', 'KR1Y', 'KR3Y', 'KR5Y', 'KR10Y', 'KR20Y', 'KR30Y']
+      const order = [
+        'KOSPI', 'KOSDAQ', 'SPX', 'DJI', 'IXIC', 'RUT', 'SOX', 'VIX', 'USDKRW',
+        'KR1Y', 'KR3Y', 'KR5Y', 'KR10Y', 'KR20Y', 'KR30Y', 'US13W', 'US5Y', 'US10Y', 'US30Y',
+      ]
       const rows = (data ?? []).sort((a, b) => (order.indexOf(a.symbol) + 1 || 99) - (order.indexOf(b.symbol) + 1 || 99))
       const kst = (t: string) => new Date(Date.parse(t) + 9 * 3600_000).toISOString().slice(0, 16).replace('T', ' ') + ' KST'
       const row = (r: (typeof rows)[number]) => {
@@ -734,11 +739,90 @@ const handler = createMcpHandler((ctx) => {
           as_of: kst(r.fetched_at),
         }
       }
+      const us = (r: (typeof rows)[number]) => r.source === 'yahoo'
       return json({
-        indices: rows.filter((r) => r.kind === 'index').map(row),
+        kr_indices: rows.filter((r) => r.kind === 'index' && !us(r)).map(row),
+        us_indices: rows.filter((r) => r.kind === 'index' && us(r)).map(row),
         fx: rows.filter((r) => r.kind === 'fx').map(row),
-        kr_government_bonds: rows.filter((r) => r.kind === 'rate').map(row),
+        kr_government_bonds: rows.filter((r) => r.kind === 'rate' && !us(r)).map(row),
+        us_treasury_yields: rows.filter((r) => r.kind === 'rate' && us(r)).map(row),
         ...(rows.length ? {} : { note: 'No market data collected yet.' }),
+      })
+    },
+  )
+
+  server.registerTool(
+    'get_us_quote',
+    {
+      title: '미국 주식·ETF 시세',
+      description:
+        'Latest stored quote of up to 20 US stocks or ETFs (Yahoo Finance, refreshed every 5 minutes during the US ' +
+        'session, ~22:00–07:00 KST): price, previous close, change and % change, day open/high/low, volume, market cap, ' +
+        'market state (PRE, REGULAR, POST, CLOSED) and when the price was traded. Quotes are delayed by delay_min ' +
+        'minutes (Yahoo\'s own figure: usually 15–20 for stocks, 0 or 15 for ETFs). Only tracked tickers have a quote: ' +
+        'those mentioned in Telegram or X posts in the last 90 days, plus fixed ETFs (SPY, VOO, QQQ, DIA, IWM, SOXX, SMH, ' +
+        'XLK, TLT, GLD, TQQQ, SOXL); others are listed in not_tracked. For a company name, find the ticker with ' +
+        'find_us_stock first.',
+      inputSchema: z.object({
+        tickers: z.array(z.string().min(1).max(12)).min(1).max(20).describe('US tickers, e.g. ["NVDA", "BRK.B", "SPY"]'),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ tickers }) => {
+      // Accept $NVDA, nvda, BRK-B (Yahoo's form) as well as BRK.B (us_symbols' form)
+      const wanted = [...new Set(tickers.map((t) => t.trim().replace(/^\$/, '').toUpperCase().replace(/-/g, '.')).filter(Boolean))]
+      const { data, error } = await step('us_quotes', supabase.from('us_quotes')
+        .select('ticker, name, exchange, quote_type, price, prev_close, open, high, low, volume, market_cap, market_state, market_time, value_date, delay_min, fetched_at')
+        .in('ticker', wanted))
+      if (error) throw new Error(error.message)
+      const byTicker = new Map((data ?? []).map((r) => [r.ticker, r]))
+      const missing = wanted.filter((t) => !byTicker.has(t))
+      // Not tracked (a real ticker no post mentioned lately) vs. not a listed ticker at all
+      let listed = new Set<string>()
+      if (missing.length) {
+        const { data: sym, error: sErr } = await step('us_symbols', supabase.from('us_symbols').select('ticker').in('ticker', missing))
+        if (sErr) throw new Error(sErr.message)
+        listed = new Set((sym ?? []).map((r) => r.ticker))
+      }
+      const kst = (t: string) => new Date(Date.parse(t) + 9 * 3600_000).toISOString().slice(0, 16).replace('T', ' ') + ' KST'
+      const n = (v: unknown) => (v == null ? null : Number(v))
+      const quotes = wanted.filter((t) => byTicker.has(t)).map((t) => {
+        const r = byTicker.get(t)!
+        const price = Number(r.price)
+        const prev = n(r.prev_close)
+        const diff = prev == null ? null : price - prev
+        return {
+          ticker: r.ticker,
+          name: r.name,
+          exchange: r.exchange,
+          type: r.quote_type,
+          price,
+          prev_close: prev,
+          change: diff == null ? null : Math.round(diff * 100) / 100,
+          change_pct: diff == null || !prev ? null : Math.round((diff / prev) * 10000) / 100,
+          open: n(r.open),
+          high: n(r.high),
+          low: n(r.low),
+          volume: n(r.volume),
+          market_cap: n(r.market_cap),
+          market_state: r.market_state,
+          value_date: r.value_date,
+          traded_at: r.market_time ? kst(r.market_time) : null,
+          delay_min: r.delay_min,
+          as_of: kst(r.fetched_at),
+        }
+      })
+      return json({
+        quotes,
+        ...(missing.length
+          ? {
+            not_tracked: missing.filter((t) => listed.has(t)),
+            unknown: missing.filter((t) => !listed.has(t)),
+            note: 'not_tracked: listed, but no Telegram/X post mentioned it in the last 90 days (and not a fixed ETF), so ' +
+              'no quote is stored. unknown: not in the US symbol list, which has stocks but almost no ETFs (find_us_stock ' +
+              'looks a stock up by name).',
+          }
+          : {}),
       })
     },
   )

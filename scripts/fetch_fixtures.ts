@@ -7,6 +7,7 @@
 //   deno task fixtures kis             # KIS snapshot now (live during the session, last close otherwise)
 //   deno task fixtures telegram ehdwl  # one public channel's preview page (default ehdwl)
 //   deno task fixtures market          # KIS: KOSPI/KOSDAQ, KRW/USD, KR government bond yields (market-ingest)
+//   deno task fixtures yahoo           # Yahoo Finance: US indices, yields, a few stocks / ETFs (market-ingest ?set=us)
 //
 // Each run costs: KRX 2 calls (daily limit ~10,000), KIS 1 token + 1 quote call, Telegram 1 page; market: KIS 1 token
 // + 10 calls.
@@ -149,6 +150,20 @@ async function market(env: Record<string, string>) {
   await save(new URL('market-ingest/fixtures/', ROOT), `kis_market_${stamp}.json`, JSON.stringify({ fetched_at: fetchedAt, responses: out }, null, 1))
 }
 
+// ---- market-ingest ?set=us (Yahoo Finance via yahoo-finance2; no key) ------------------------------
+
+async function yahoo() {
+  const { default: YahooFinance } = await import('jsr:@gadicc/yahoo-finance2@4.0.5')
+  const { US_INDICES, US_YIELDS } = await import('../supabase/functions/market-ingest/us.ts')
+  // Indices, yields, Nasdaq and NYSE stocks, a class share (BRK.B → BRK-B), ETFs, and a ticker that doesn't exist
+  const symbols = [...US_INDICES, ...US_YIELDS].map((s) => s.yahoo).concat(['NVDA', 'ORCL', 'BRK-B', 'SPY', 'SOXL', 'ZZZZZQ'])
+  const yf = new YahooFinance({ suppressNotices: ['yahooSurvey'] })
+  const quotes = await yf.quote(symbols, {}, { validateResult: false })
+  const stamp = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '_')
+  await save(new URL('market-ingest/fixtures/', ROOT), `yahoo_quote_${stamp}.json`,
+    JSON.stringify({ fetched_at: new Date().toISOString(), requested: symbols, quotes }, null, 1))
+}
+
 // ---- Telegram -------------------------------------------------------------------------------------
 
 async function telegram(channel: string) {
@@ -163,9 +178,10 @@ async function telegram(channel: string) {
 // ---- main -----------------------------------------------------------------------------------------
 
 const [what = 'all', arg] = Deno.args
-const env = what === 'telegram' ? {} : loadEnv()
+const env = what === 'telegram' || what === 'yahoo' ? {} : loadEnv()
 const basDd = what === 'krx' && arg ? arg : '20261113'
 if (what === 'all' || what === 'krx') await krx(env, basDd)
 if (what === 'all' || what === 'kis') await kis(env, basDd)
 if (what === 'all' || what === 'market') await market(env)
+if (what === 'all' || what === 'yahoo') await yahoo()
 if (what === 'all' || what === 'telegram') await telegram(what === 'telegram' && arg ? arg : 'ehdwl')

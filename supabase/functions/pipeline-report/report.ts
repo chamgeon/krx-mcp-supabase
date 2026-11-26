@@ -9,7 +9,8 @@ export type Run = {
   started_at: string
   ok: boolean | null // null: still running (or stopped and not yet marked; ops.ts sweepKilled marks it within minutes)
   // the function's answer: kis-ingest { date, rows, as_of } | { date, skipped }; krx-ingest { results };
-  // telegram-ingest { polled, new_posts, gate?: { gated, noise, failed, left, tokens: { input, output } } | { error } }
+  // telegram-ingest { polled, new_posts, gate?: { gated, noise, failed, left, tokens: { input, output } } | { error } };
+  // market-ingest-us { stored, ... }
   // deno-lint-ignore no-explicit-any
   summary: any
   error: string | null
@@ -29,6 +30,44 @@ const n = (x: number) => x.toLocaleString('en-US')
 const count = (x: number, one: string, many: string) => `${n(x)} ${x === 1 ? one : many}`
 
 const M = (x: number) => (x >= 1e6 ? `${(x / 1e6).toFixed(2)}M` : `${Math.round(x / 1e3)}K`)
+
+/**
+ * market-ingest, one job per set, over the window (yesterday 18:00 → today 18:00 KST; `dow` is today's weekday):
+ *   market-ingest-live   every 5 min 09:01–01:56 KST Mon–Fri: in the window unless today is Sunday (Saturday's window
+ *                        still holds Friday night's runs)
+ *   market-ingest-bonds  18:30 KST Mon–Fri: in the window when yesterday was a weekday
+ *   market-ingest-us     every 5 min 22:03–06:58 KST, US weekdays: in the window when yesterday was a weekday
+ * One ✅ line when every expected job ran with at least one success; otherwise ❌ naming each one that didn't run, or
+ * ran without a single success (its failures are also in the failed-runs list). Null when none was expected or ran.
+ */
+export function marketReport(runs: Run[], dow: number): string | null {
+  const prevWeekday = ((dow + 6) % 7) >= 1 && ((dow + 6) % 7) <= 5
+  const jobs = [
+    { job: 'market-ingest-live', label: 'KR', expected: dow !== 0 },
+    { job: 'market-ingest-bonds', label: 'KR bonds', expected: prevWeekday },
+    { job: 'market-ingest-us', label: 'US', expected: prevWeekday },
+  ]
+  const problems: string[] = []
+  const parts: string[] = []
+  for (const { job, label, expected } of jobs) {
+    const all = runs.filter((r) => r.job === job)
+    const good = all.filter((r) => r.ok)
+    if (!all.length) {
+      if (expected) problems.push(`${job} didn't run`)
+      continue
+    }
+    if (!good.length) {
+      problems.push(`${job}: no successful run (${count(all.length, 'failed run', 'failed runs')})`)
+      continue
+    }
+    const last = good.reduce((a, b) => (b.started_at > a.started_at ? b : a))
+    const at = kstTime(new Date(last.started_at)).slice(6)
+    const stocks = typeof last.summary?.stored === 'number' ? `, ${n(last.summary.stored)} stocks` : ''
+    parts.push(good.length === 1 ? `${label} ${at}` : `${label} ${count(good.length, 'run', 'runs')}, last ${at}${stocks}`)
+  }
+  if (problems.length) return `❌ Markets: ${problems.join('; ')}${parts.length ? ` (ok: ${parts.join('; ')})` : ''}`
+  return parts.length ? `✅ Markets: ${parts.join('; ')}` : null
+}
 
 /**
  * The Telegram gate over the window, from telegram-ingest's run summaries (telegram-ingest/gating.ts): posts gated,
@@ -124,6 +163,9 @@ export function buildReport({ end, runs, pendingKrxDays, krxLatest, channelError
       }`,
     )
   }
+
+  const marketLine = marketReport(runs, dow)
+  if (marketLine) lines.push(marketLine)
 
   // Failed runs, per job
   const failed = runs.filter((r) => r.ok === false) // includes runs stopped at the time limit (ops.ts)
