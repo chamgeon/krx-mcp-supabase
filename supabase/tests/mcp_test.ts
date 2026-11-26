@@ -326,6 +326,11 @@ test('invalid arguments are rejected by the schema, not crashed on', async () =>
   assert(r.isError, 'days: 0 should fail validation')
   const long = await (await keyClient()).callTool({ name: 'get_stock_history', arguments: { code: '900001', days: 121 } })
   assert(long.isError, 'days: 121 should fail validation (max 120)')
+  // screen_stocks windows are capped at 60 (a 120-day window read can pass the 8 s statement timeout)
+  for (const k of ['avg_days', 'sideways_days', 'volatility_days']) {
+    const s = await (await keyClient()).callTool({ name: 'screen_stocks', arguments: { [k]: 61 } })
+    assert(s.isError, `screen_stocks ${k}: 61 should fail validation (max 60)`)
+  }
 })
 
 // ---- telegram tools -------------------------------------------------------------------------------

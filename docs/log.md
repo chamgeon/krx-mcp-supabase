@@ -963,6 +963,49 @@ What was done and why. Oldest first; new entries go at the bottom.
   start (`gateBatch`'s new `stopAt`; before, its 100 s deadline counted from the gate's own start).
 - Not covered: one channel whose catch-up fetches 5 slow pages that each answer just under 10 s (~50 s); then a
   started channel can end near 110 s. Rare (a gap and a slow t.me at once).
+## 2026-11-26 — Pipeline health check; fake Telegram channel deactivated
+- **Telegram:** `thekobeissiletter` ("The Kobeissi Letter", 11.5k subscribers) has had no public preview since
+  11-23 19:00 UTC (`t.me/s/…` redirects to the channel page), and it carries Telegram's FAKE badge: an impostor of the
+  real Kobeissi Letter. It failed every telegram-ingest run since (52 in a row, ~60 failed runs/alerts in the week).
+  **Done:** `active = false` in production (not deleted: its 243 posts, 11-11 → 11-23, and 1 subscription are kept).
+  The other 9 channels poll fine. The other failures in the week were the 11-21..11-24 t.me outages (poll loop stop).
+  Gate backlog 0.
+- **YouTube:** the Apify actor's runs failed as a whole on 11-23 07:32–12:47 UTC (~64 runs, `run-failed`). The batch
+  was four ordinary videos, all transcribed on the first good run (12:52), so the outage was Apify's. Nothing was lost;
+  every run since is ok. The one video still without a transcript (`eEHBDFbB9vU`, 11-25 live stream) is waiting for
+  captions, which is normal: earlier ~10 h streams took 7 tries.
+- **X:** 1 failed run in the week (Apify 502, 11-22); all 4 accounts current, gate backlog 0.
+
+## 2026-11-26 — `daily_prices_screen_idx` dropped (migration `20261126000000_drop_screen_idx.sql`)
+- **Why:** 67 MB (the largest index; `daily_prices` was 261 MB of the 321 MB database), with the same key as
+  `daily_prices_pkey`, kept for one rarely used tool: `screen_stocks` had 8 calls 11-17 → 11-25, one user. Its 120k
+  scans were mostly the Telegram/X feeds' stock-name lookup (`bas_dd = … and isu_cd in (…)`), which also reads
+  `isu_nm` from the heap and is as fast on the pkey. Every other `daily_prices` read already used the pkey or
+  `daily_prices_code_date_idx`. Also, the index wasn't really index-only: 36k of 61k rows in the 21-day read were
+  heap fetches, since the days loaded after the 11-13 autovacuum weren't all-visible.
+- **Checked first (production, read-only EXPLAINs through `prices`, a `mktcap` filter standing in for "no covering
+  index"):** the `materialized` CTE keeps the plan on a pkey range read + sort at 21, 60 and 120 days. Without
+  `materialized` the planner switches to `daily_prices_code_date_idx` from ~60-day windows on (at 21 days it doesn't),
+  which is the 10-11 8.5 s plan. Times: 21 days ~0.24 s warm / ~2.0 s cold either way; 120 days (the max for
+  `avg_days`, `sideways_days`, `volatility_days`) 1.4–3.6 s with the index, 1.8–4.2 s without (at 2 MB `work_mem`,
+  sort on disk; the function sets 64 MB); 120-day breakout highs 0.23 s vs 0.3–0.4 s. Under 5 s at the extremes.
+  The heap is about in date order (krx-ingest inserts each day once), so the pkey range read stays on neighbouring pages.
+- **Done:** `drop index`, and `screen_stocks` v7 = v6 with only the CTE comment changed (production's body was diffed
+  against v6 first: identical). Local: `deno task check`, `test` (170), `test:db` (43), `test:mcp` (52) pass.
+- **Rollback:** re-create the index as in `20261011000002_screen_stocks_volume.sql` (a few seconds).
+- **After the push (11:55 KST, production):** `daily_prices` indexes 127 → 60 MB, database 321 → 254 MB. Every read
+  in the function stays on `daily_prices_pkey`; the feeds' stock-name lookup moved to the pkey (1 ms).
+  `screen_stocks` end to end through MCP: the default screen (20-day, -8%, ≥100억) 1.0 s, of which the RPC took
+  0.63 s (it was 1.5–1.9 s before). Worst case (avg/sideways/volatility 120 + breakout 20/60/120): one call alone
+  3.9 s (RPC 3.6 s); **two such calls at the same moment both hit the 8 s statement timeout** (10.6–10.9 s).
+  The raw 120-day window read was 6.3 s on its first run after the drop and 2.1 s after. Not measured: the same
+  worst case before the drop, so how much of this the drop added is unknown.
+- **Then (built, not deployed):** `screen_stocks`' `avg_days`, `sideways_days` and `volatility_days` capped at 60 in
+  the MCP schema (was 120). **Why:** the 120-day window is what timed out, and no real call has used more than 20
+  (the one other user: 8 calls, all 20-day, no `breakout_days`). `breakout_days: [120]` stays (its read is 0.3–0.4 s);
+  `analyze_stock` keeps 120 (one stock). The SQL function still accepts 120 (MCP is its only caller).
+  `mcp_test.ts` checks 61 is rejected for each.
+
 ## Open
 - Cold calls (~+2.2–3.5 s each, every tool): decide on a keep-warm ping (pg_cron, one ping landing in us-east-1 and one
   next to the database, every minute) vs. moving the project to us-east-1. A ping every minute would keep workers
@@ -990,6 +1033,8 @@ What was done and why. Oldest first; new entries go at the bottom.
   the per-step `timings`. Database-backed read-only tools only, outside the session (no KIS or t.me calls), via the
   operator key (unlogged); short runs, within free-plan fair use. Framed as knowing the limits, not as needing scale.
 - 11-30: check the `live_prices` cleanup (no day older than 10 days).
+- `screen_stocks` window cap (11-26, built, not deployed): deploy `mcp`, then check that `avg_days: 61` is
+  rejected. After that, watch `tool_calls` for `screen_stocks` timeouts.
 - Telegram gate, after deploy: watch the backlog drain (`gate.left` in telegram-ingest's `ingest_runs` summary), the
   failure count, and the first `us_symbols` refresh; spot-check hidden noise with `include_noise: true`.
 - Normalized chunks for Telegram posts (dropped from Phase 2 on 11-19, needed after all): posts stored as clean,

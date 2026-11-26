@@ -418,12 +418,12 @@ const handler = createMcpHandler((ctx) => {
         max_fluc_rt: z.number().optional().describe('등락률 % <='),
         min_trdval_eok: z.number().optional().describe('거래대금 (억원) >='),
         min_mktcap_eok: z.number().optional().describe('시가총액 (억원) >='),
-        avg_days: z.number().int().min(1).max(120).default(20).describe('Prior-day window for the 거래대금 and 거래량 averages'),
+        avg_days: z.number().int().min(1).max(60).default(20).describe('Prior-day window for the 거래대금 and 거래량 averages'),
         min_trdval_ratio: z.number().optional().describe('거래대금 / prior avg_days average >= (e.g. 3)'),
         min_volume: z.number().int().optional().describe('거래량 (shares) >='),
         min_volume_ratio: z.number().optional().describe('거래량 / prior avg_days average >= (e.g. 3)'),
         min_trdval_up_days: z.number().int().min(1).optional().describe('거래대금 increased at least this many days in a row'),
-        sideways_days: z.number().int().min(5).max(120).default(20),
+        sideways_days: z.number().int().min(5).max(60).default(20),
         sideways_recent_days: z.number().int().min(1).max(60).default(5),
         max_sideways_range: z.number().optional().describe('Box high/low range % <= (e.g. 15)'),
         min_sideways_trdval_growth: z.number().optional().describe('Recent / earlier 거래대금 inside the box >= (e.g. 1.5)'),
@@ -432,7 +432,7 @@ const handler = createMcpHandler((ctx) => {
           .optional()
           .describe('Require close > prior N-day high for every N listed'),
         min_price_up_days: z.number().int().min(1).optional().describe('Closed higher at least this many days in a row'),
-        volatility_days: z.number().int().min(2).max(120).default(20),
+        volatility_days: z.number().int().min(2).max(60).default(20),
         min_volatility: z.number().optional(),
         max_volatility: z.number().optional(),
         sort: z
