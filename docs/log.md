@@ -175,6 +175,20 @@ What was done and why. Oldest first; new entries go at the bottom.
   model calls unlisted when the name exactly matches a US listing (Anthropic → ANT; v5 never tagged it).
 - **Decided:** no YouTube chunking; transcripts are different data, and paging plus `query` are enough.
 
+## 2026-11-27 — Pipeline check; YouTube feed retries; digest parts' own tags
+- Since 04:32 UTC the YouTube RSS feed answers 503 now and then, from any IP (3 of 12 tries from a home connection
+  too). Each 503 was a channel failure: an alert, then the channel skipped for an hour (all 4 by 07:17; a 07:09 upload
+  waited for the next try). Nothing lost: the feed lists the newest 15.
+- `fetchFeed` now tries a 5xx or network error 3 times, 1.5 s apart. A channel counts as failing only after 3 bad
+  polls in a row (`FAILING_AFTER`): then it is retried hourly and its failures alert. A first or second failure is only
+  recorded (on the channel, and in the run's `results`).
+- Checked: Telegram chunks are live (migration and both functions deployed 11-26; 4,345 chunks on 244 of 246 long
+  posts, the other 2 came out as one part, which stores none; all posts gated, v6 since 11-26). Filtered feeds show
+  only the matching part. KRW/USD updates in the evening session (1344.7 → 1343.2 → 1344.4, 20:00–01:00 KST). The
+  18:00 report has its `Markets` and YouTube lines (confirmed by the operator).
+- A filtered feed's digest shown as parts now lists the parts' own stocks, tickers and events, not the whole post's
+  (`ehdwl/11341`: one Anthropic paragraph had 45 tickers). On the 64 chunked `anthropic-ipo` posts: 1,349 → 312.
+
 ## Open
 - Cold calls (+2.2–3.5 s each, every tool): keep-warm ping vs. moving the project to `us-east-1`. A ping keeps workers
   alive but probably not the DB connection (a 60 s pause already pays ~400–600 ms). Also `screen_stocks`' cold SQL
@@ -182,10 +196,7 @@ What was done and why. Oldest first; new entries go at the bottom.
   and after-idle calls apart (`deno task bench --region us-east-1`, after 15:30).
 - Load benchmark (`bench:load`, not built): latency and errors at 1 → 50 concurrent calls, read-only tools, operator
   key, short runs.
-- 11-30: check the `live_prices` cleanup (no day older than 10 days; on 11-26 the oldest was 11-19).
-- Markets: check the first 18:00 report's `Markets` and YouTube lines (YouTube needs `pipeline-report` deployed);
-  KRW/USD updates in the evening session (only daytime probed); the 18:30 국고채 value is the day's final one; Yahoo 429s
-  over a full US session (Monday 11-30). Not collected: BOK base rate (ECOS key), US 2Y (Treasury.gov daily).
-- Telegram chunks: deploy (`supabase db push --remote` for 20261126000004, then `telegram-ingest` and `mcp`); after
-  the ~6 re-gating runs, spot-check chunks and their tags on real digests, and `get_telegram_feed(event: …)` sizes.
-- Thesis tracking (plan.md → Phase 4): build 4.1 (tables, thesis tools, `add_event`).
+- 11-30: check the `live_prices` cleanup (no day older than 10 days; on 11-27 the oldest was still 11-19).
+- Markets: the 18:30 국고채 value is the day's final one; Yahoo 429s over a full US session (the `us` set first ran on
+  Thanksgiving; Monday 11-30). Not collected: BOK base rate (ECOS key), US 2Y (Treasury.gov daily).
+- Deploy (2026-11-27 changes): `youtube-ingest` (feed retries) and `mcp` (parts' own tags).

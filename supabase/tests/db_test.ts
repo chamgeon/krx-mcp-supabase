@@ -881,7 +881,15 @@ Deno.test('pollChannel: the first poll stores the newest 5 (no Shorts), later po
     const r3 = await pollChannel(db, YT_CHANNEL, (() => Promise.resolve(new Response('gone', { status: 404 }))) as unknown as typeof fetch)
     assertEquals([r3.ok, r3.error], [false, `feed ${YT_CHANNEL}: HTTP 404`])
     const { data: ch2 } = await db.from('youtube_channels').select('poll_errors, last_error').eq('channel_id', YT_CHANNEL).single()
-    assertEquals(ch2!.poll_errors, 1)
+    assertEquals([ch2!.poll_errors, r3.errors], [1, 1])
+
+    // a second failure counts on; a good poll resets the count
+    const r4 = await pollChannel(db, YT_CHANNEL, (() => Promise.resolve(new Response('busy', { status: 503 }))) as unknown as typeof fetch, 0)
+    assertEquals([r4.ok, r4.errors], [false, 2])
+    const r5 = await pollChannel(db, YT_CHANNEL, ytFeed(seven))
+    assertEquals([r5.ok, r5.errors], [true, 0])
+    const { data: ch3 } = await db.from('youtube_channels').select('poll_errors, last_error').eq('channel_id', YT_CHANNEL).single()
+    assertEquals([ch3!.poll_errors, ch3!.last_error], [0, null])
   })
 })
 

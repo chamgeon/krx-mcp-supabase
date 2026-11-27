@@ -551,13 +551,16 @@ test('get_telegram_feed: with a filter, a chunked digest shows only its parts ab
     const us = await call('get_telegram_feed', { all_channels: true, us_stock: 'NVDA', since: '2026-11-01' })
     const p = us.posts.find((x: Json) => x.link.endsWith('/3010'))
     assertEquals(p.text, '🌎 브리핑\n• 엔비디아 실적 발표.')
+    assertEquals([p.us_stocks, p.events], [[{ ticker: 'NVDA', name: 'NVIDIA Corporation' }], undefined]) // the part's tags
     assertStringIncludes(us.parts_note, 'only their parts')
     const ev = await call('get_telegram_feed', { all_channels: true, event: 'test-ipo', since: '2026-11-01' })
-    assertEquals(ev.posts.find((x: Json) => x.link.endsWith('/3010')).text, '• 테스트 IPO 흥행.')
-    // No filter: the post's opening as before, no note
+    const e = ev.posts.find((x: Json) => x.link.endsWith('/3010'))
+    assertEquals([e.text, e.us_stocks, e.events], ['• 테스트 IPO 흥행.', undefined, ['test-ipo']])
+    // No filter: the post's opening and all its tags as before, no note
     const all = await call('get_telegram_feed', { all_channels: true, since: '2026-11-01', max_chars: 300 })
     const whole = all.posts.find((x: Json) => x.link.endsWith('/3010'))
     assertEquals([whole.text.length, all.parts_note], [301, undefined]) // 300 characters + '…'
+    assertEquals([whole.us_stocks.length, whole.events], [1, ['test-ipo']])
   } finally {
     await admin.from('telegram_messages').delete().eq('username', 'testchannel_b').eq('msg_id', 3010) // chunks go with it
   }

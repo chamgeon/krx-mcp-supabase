@@ -67,6 +67,42 @@ export function feedChannels(rows: FeedRow[]) {
   return [...by.values()].sort((a, b) => b.in_window - a.in_window || a.channel.localeCompare(b.channel))
 }
 
+// A chunked post's parts that match a filter: their texts in order, and the tags those parts carry
+export type Parts = { texts: string[]; stock_codes: string[]; us_tickers: string[]; events: string[] }
+type ChunkRow = { username: string; msg_id: number; idx: number; text: string; stock_codes: string[]; us_tickers: string[]; events: string[] }
+
+/** Chunk rows (in idx order) → the parts of each wanted post, keyed `username/msg_id`; tags merged, in first-seen order. */
+export function partsByPost(rows: ChunkRow[], wanted: Set<string>): Map<string, Parts> {
+  const out = new Map<string, Parts>()
+  const add = (to: string[], from: string[] | null) => {
+    for (const x of from ?? []) if (!to.includes(x)) to.push(x)
+  }
+  for (const c of rows) {
+    const key = `${c.username}/${c.msg_id}`
+    if (!wanted.has(key)) continue // same msg_id in another channel
+    const p = out.get(key) ?? { texts: [], stock_codes: [], us_tickers: [], events: [] }
+    p.texts.push(c.text)
+    add(p.stock_codes, c.stock_codes)
+    add(p.us_tickers, c.us_tickers)
+    add(p.events, c.events)
+    out.set(key, p)
+  }
+  return out
+}
+
+/** A post shown as its matching parts lists those parts' stocks, tickers and events, not the whole post's. */
+export function asParts<M extends Msg>(m: M, parts: Parts | undefined, maxChars: number): M {
+  if (!parts) return m
+  const text = parts.texts.join('\n…\n')
+  return {
+    ...m,
+    text: text.length > maxChars ? text.slice(0, maxChars) + '…' : text,
+    stock_codes: parts.stock_codes,
+    us_tickers: parts.us_tickers,
+    events: parts.events,
+  }
+}
+
 // Latest trading day, cached per function instance for a few minutes (it changes once a day). Used to look up
 // 종목명 for the stock codes in results.
 let latestDay: { day: string | null; at: number } | null = null
@@ -115,26 +151,19 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
     return new Map((data ?? []).map((r) => [r.ticker, r.name.split(' - ')[0].replace(/ (Common|Ordinary|Class [A-Z]|American Depositary).*$/, '')]))
   }
 
-  // A filtered feed's chunked posts: their chunks with the filter's tag, in order, keyed `username/msg_id`. A chunked
-  // post none of whose chunks carries the tag (the post-level tag came from a name no chunk contains) isn't in the map
-  // and is shown as usual.
+  // A filtered feed's chunked posts: their chunks with the filter's tag (texts and tags), keyed `username/msg_id`. A
+  // chunked post none of whose chunks carries the tag (the post-level tag came from a name no chunk contains) isn't in
+  // the map and is shown as usual.
   async function matchingChunks(msgs: Msg[], f: { code: string | null; us: string | null; event: string | null }) {
-    const out = new Map<string, string[]>()
     const ids = [...new Set(msgs.map((m) => m.msg_id))]
-    if (!ids.length) return out
-    let q = supabase.from('telegram_chunks').select('username, msg_id, idx, text').in('msg_id', ids)
+    if (!ids.length) return new Map<string, Parts>()
+    let q = supabase.from('telegram_chunks').select('username, msg_id, idx, text, stock_codes, us_tickers, events').in('msg_id', ids)
     if (f.code) q = q.contains('stock_codes', [f.code])
     if (f.us) q = q.contains('us_tickers', [f.us])
     if (f.event) q = q.contains('events', [f.event])
     const { data, error } = await step('chunks', q.order('idx'))
     if (error) throw new Error(error.message)
-    const wanted = new Set(msgs.map((m) => `${m.username}/${m.msg_id}`))
-    for (const c of data ?? []) {
-      const key = `${c.username}/${c.msg_id}`
-      if (!wanted.has(key)) continue // same msg_id in another channel
-      out.set(key, [...(out.get(key) ?? []), c.text])
-    }
-    return out
+    return partsByPost((data ?? []) as ChunkRow[], new Set(msgs.map((m) => `${m.username}/${m.msg_id}`)))
   }
 
   async function present(msgs: Msg[], maxChars: number, day: Day, snippetOf?: (m: Msg) => string) {
@@ -518,7 +547,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
       if (res.error) throw new Error(res.error.message)
       const data = (res.data ?? []) as FeedRow[]
       // With a stock / US / event filter, a long post that was chunked shows only its chunks with that tag
-      const parts = f.code || f.us || f.event ? await matchingChunks(data, f) : new Map<string, string[]>()
+      const parts = f.code || f.us || f.event ? await matchingChunks(data, f) : new Map<string, Parts>()
       const channels = feedChannels(data)
       const cut = channels.filter((c) => c.shown < c.in_window)
       return json({
@@ -536,11 +565,7 @@ export function registerTelegramTools(server: McpServer, supabase: SupabaseClien
         ...(parts.size
           ? { parts_note: 'Long posts (digests) show only their parts about the filter, separated by "…"; the link opens the whole post.' }
           : {}),
-        posts: await present(data, max_chars, day, parts.size ? (m) => {
-          const p = parts.get(`${m.username}/${m.msg_id}`)
-          const text = p ? p.join('\n…\n') : m.text
-          return text.length > max_chars ? text.slice(0, max_chars) + '…' : text
-        } : undefined),
+        posts: await present(data.map((m) => asParts(m, parts.get(`${m.username}/${m.msg_id}`), max_chars)), max_chars, day),
       })
     },
   )

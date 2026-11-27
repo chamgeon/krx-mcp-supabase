@@ -2,7 +2,7 @@
 // Run from the repo root: deno task test
 
 import { assertEquals, assertThrows } from 'jsr:@std/assert@1.0.19'
-import { feedChannels, sinceIso } from './telegram.ts'
+import { asParts, feedChannels, partsByPost, sinceIso } from './telegram.ts'
 
 Deno.test('sinceIso: a bare date means midnight KST', () => {
   assertEquals(sinceIso('2026-11-01', 7), '2026-10-31T15:00:00.000Z')
@@ -28,4 +28,34 @@ Deno.test('feedChannels: shown, today and window counts per channel, busiest fir
     ],
   )
   assertEquals(feedChannels([]), [])
+})
+
+Deno.test('partsByPost: chunks grouped per wanted post, in order, with their tags merged once', () => {
+  const c = (username: string, msg_id: number, idx: number, text: string, us: string[], events: string[] = []) =>
+    ({ username, msg_id, idx, text, stock_codes: [], us_tickers: us, events })
+  const parts = partsByPost([
+    c('digest', 7, 0, 'Anthropic part', ['ANT'], ['anthropic-ipo']),
+    c('digest', 7, 3, 'Anthropic and Nvidia', ['ANT', 'NVDA'], ['anthropic-ipo']),
+    c('other', 7, 0, 'same msg_id, another channel', ['TSLA']),
+  ], new Set(['digest/7']))
+  assertEquals([...parts.keys()], ['digest/7'])
+  assertEquals(parts.get('digest/7'), {
+    texts: ['Anthropic part', 'Anthropic and Nvidia'],
+    stock_codes: [],
+    us_tickers: ['ANT', 'NVDA'],
+    events: ['anthropic-ipo'],
+  })
+})
+
+Deno.test("asParts: a post shown as parts lists the parts' tags, not the whole post's; others unchanged", () => {
+  const post = {
+    username: 'digest', msg_id: 7, ts: '2026-11-26T00:00:00Z', text: 'the whole digest', views: 1, forwarded_from: null,
+    has_media: false, links: [], stock_codes: ['005930'], us_tickers: ['ANT', 'AZN', 'CPNG', 'META'],
+    events: ['amd-short-report', 'anthropic-ipo'], label: 'market' as const,
+  }
+  const parts = { texts: ['part one', 'part two'], stock_codes: [], us_tickers: ['ANT'], events: ['anthropic-ipo'] }
+  const shown = asParts(post, parts, 1500)
+  assertEquals([shown.text, shown.stock_codes, shown.us_tickers, shown.events], ['part one\n…\npart two', [], ['ANT'], ['anthropic-ipo']])
+  assertEquals(asParts(post, parts, 10).text, 'part one\n…' + '…')
+  assertEquals(asParts(post, undefined, 1500), post)
 })

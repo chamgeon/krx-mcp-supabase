@@ -9,13 +9,22 @@
 // A channel's first poll stores its newest 5 videos (the backfill); later polls, every newer one. Transcripts run only
 // when APIFY_API_KEY is set: up to 10 videos a run, newest first. A video whose transcript isn't there yet (captions
 // take a while; a live stream has none until it ends) is retried after 15 min, 30 min, 1 h … 8 h, and given up on 48 h
-// after it was published. A channel that keeps failing is retried at most hourly. Returns 500 when a channel fails or
-// the transcript call fails as a whole, so ingest_runs records it and the operator is alerted (hourly at most).
+// after it was published. A feed answering 5xx is tried 3 times. A channel failing 3 polls in a row is retried at most
+// hourly. Returns 500 when such a failing channel fails again or the transcript call fails as a whole, so ingest_runs
+// records it and the operator is alerted (hourly at most); a channel's first or second failure is only recorded.
 
 import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { monitored } from '../_shared/ops.ts'
-import { apifyTranscripts, pollChannel, type PollResult, transcriptBatch, type TranscriptSummary } from '../_shared/youtube.ts'
+import {
+  alertingFailures,
+  apifyTranscripts,
+  channelDue,
+  pollChannel,
+  type PollResult,
+  transcriptBatch,
+  type TranscriptSummary,
+} from '../_shared/youtube.ts'
 
 const INGEST_SECRET = Deno.env.get('INGEST_SECRET')!
 const APIFY_API_KEY = Deno.env.get('APIFY_API_KEY')
@@ -25,8 +34,6 @@ const supabase = createClient(
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
   { auth: { persistSession: false } },
 )
-
-const FAILING_RETRY_MS = 3600_000
 
 Deno.serve(monitored('youtube-ingest', supabase, async (req) => {
   if (req.headers.get('x-ingest-secret') !== INGEST_SECRET) {
@@ -39,9 +46,7 @@ Deno.serve(monitored('youtube-ingest', supabase, async (req) => {
   if (error) return Response.json({ error: error.message }, { status: 500 })
 
   // A failing channel (e.g. deleted) is retried at most hourly, unless asked for by name
-  const due = (channels ?? []).filter((c) =>
-    only || c.poll_errors === 0 || !c.last_polled_at || Date.now() - Date.parse(c.last_polled_at) > FAILING_RETRY_MS
-  )
+  const due = (channels ?? []).filter((c) => only || channelDue(c))
   const results: PollResult[] = []
   for (const c of due) results.push(await pollChannel(supabase, c.channel_id))
 
@@ -54,7 +59,8 @@ Deno.serve(monitored('youtube-ingest', supabase, async (req) => {
     }
   }
 
-  const failed = results.filter((r) => !r.ok)
+  // A one-off feed error is in `results` and on the channel, but not an alert ('?channel=' always reports)
+  const failed = only ? results.filter((r) => !r.ok) : alertingFailures(results)
   return Response.json(
     {
       ran_in: HERE_REGION,

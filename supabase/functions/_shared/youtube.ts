@@ -18,6 +18,13 @@ export const TRANSCRIPTS_PER_RUN = 10
 export const RETRY_MINUTES = [15, 30, 60, 120, 240, 480]
 // A video still without a transcript this long after it was published is given up on ('none')
 export const GIVE_UP_AFTER_MS = 48 * 3600_000
+// The feed answers 503 now and then (from any IP; 3 of 12 tries on 2026-11-27): a 5xx or network error is tried again
+export const FEED_ATTEMPTS = 3
+export const FEED_RETRY_MS = 1500
+// A channel counts as failing after this many polls in a row went wrong: it is then retried at most hourly
+// (FAILING_RETRY_MS), and its failures alert. Fewer are taken as YouTube's own hiccups and only recorded.
+export const FAILING_AFTER = 3
+export const FAILING_RETRY_MS = 3600_000
 export const APIFY_ACTOR = 'apihq~youtube-transcript-scraper'
 const APIFY_TIMEOUT_S = 100 // the actor's run limit; our request waits a little longer
 
@@ -59,9 +66,19 @@ export function parseFeed(xml: string): Feed {
   return { title: tag(head, 'title'), entries }
 }
 
-export async function fetchFeed(channelId: string, fetcher: typeof fetch = fetch): Promise<Feed> {
-  const res = await fetcher(feedUrl(channelId), { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; kr-stock-mcp/1.0)' } })
-  if (!res.ok) throw new Error(`feed ${channelId}: HTTP ${res.status}`)
+export async function fetchFeed(channelId: string, fetcher: typeof fetch = fetch, retryMs = FEED_RETRY_MS): Promise<Feed> {
+  let res: Response | null = null
+  for (let attempt = 1; ; attempt++) {
+    try {
+      res = await fetcher(feedUrl(channelId), { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; kr-stock-mcp/1.0)' } })
+      if (res.status < 500 || attempt >= FEED_ATTEMPTS) break
+      await res.body?.cancel()
+    } catch (e) {
+      if (attempt >= FEED_ATTEMPTS) throw e
+    }
+    await new Promise((r) => setTimeout(r, retryMs))
+  }
+  if (!res.ok) throw new Error(`feed ${channelId}: HTTP ${res.status}${FEED_ATTEMPTS > 1 && res.status >= 500 ? ` (${FEED_ATTEMPTS} tries)` : ''}`)
   const xml = await res.text()
   if (!xml.includes('<feed')) throw new Error(`feed ${channelId}: not an Atom feed`)
   return parseFeed(xml)
@@ -74,12 +91,26 @@ export function entriesToStore(entries: FeedEntry[], stored: Set<string>, oldest
   return videos.filter((e) => !stored.has(e.video_id) && e.published_at >= oldestStored)
 }
 
-export type PollResult = { channel: string; ok: boolean; new_videos: number; error?: string }
+// `errors`: the channel's failed polls in a row after this one (0 when it went well)
+export type PollResult = { channel: string; ok: boolean; new_videos: number; errors: number; error?: string }
+
+/** Whether a channel is polled this run: always unless it is failing, and then once an hour. */
+export function channelDue(c: { poll_errors: number; last_polled_at: string | null }, now = Date.now()): boolean {
+  return c.poll_errors < FAILING_AFTER || !c.last_polled_at || now - Date.parse(c.last_polled_at) > FAILING_RETRY_MS
+}
+
+/** The failures worth an alert: channels that are now failing, not a first or second hiccup. */
+export const alertingFailures = (results: PollResult[]) => results.filter((r) => !r.ok && r.errors >= FAILING_AFTER)
 
 /** Polls one channel's feed: stores its new videos (transcripts pending) and updates the channel's poll state. */
-export async function pollChannel(supabase: SupabaseClient, channelId: string, fetcher: typeof fetch = fetch): Promise<PollResult> {
+export async function pollChannel(
+  supabase: SupabaseClient,
+  channelId: string,
+  fetcher: typeof fetch = fetch,
+  retryMs = FEED_RETRY_MS,
+): Promise<PollResult> {
   try {
-    const feed = await fetchFeed(channelId, fetcher)
+    const feed = await fetchFeed(channelId, fetcher, retryMs)
     const ids = feed.entries.map((e) => e.video_id)
     const [{ data: have, error: e1 }, { data: oldest, error: e2 }] = await Promise.all([
       supabase.from('youtube_videos').select('video_id').in('video_id', ids.length ? ids : ['-']),
@@ -102,16 +133,17 @@ export async function pollChannel(supabase: SupabaseClient, channelId: string, f
       last_error: null,
       poll_errors: 0,
     }).eq('channel_id', channelId)
-    return { channel: channelId, ok: true, new_videos: fresh.length }
+    return { channel: channelId, ok: true, new_videos: fresh.length, errors: 0 }
   } catch (e) {
     const msg = readableError((e as Error).message)
     const { data: cur } = await supabase.from('youtube_channels').select('poll_errors').eq('channel_id', channelId).single()
+    const errors = (cur?.poll_errors ?? 0) + 1
     await supabase.from('youtube_channels').update({
       last_polled_at: new Date().toISOString(),
       last_error: msg.slice(0, 500),
-      poll_errors: (cur?.poll_errors ?? 0) + 1,
+      poll_errors: errors,
     }).eq('channel_id', channelId)
-    return { channel: channelId, ok: false, new_videos: 0, error: msg }
+    return { channel: channelId, ok: false, new_videos: 0, errors, error: msg }
   }
 }
 

@@ -1,9 +1,9 @@
 // Unit tests for YouTube feed parsing, which videos are stored, and what a transcript record leads to. No network.
 // Run from the repo root: deno task test
 
-import { assert, assertEquals } from 'jsr:@std/assert@1.0.19'
+import { assert, assertEquals, assertRejects } from 'jsr:@std/assert@1.0.19'
 import {
-  BACKFILL_VIDEOS, clock, entriesToStore, type FeedEntry, GIVE_UP_AFTER_MS, outcomeOf, parseFeed, resolveChannel, RETRY_MINUTES,
+  alertingFailures, BACKFILL_VIDEOS, channelDue, clock, FAILING_AFTER, FAILING_RETRY_MS, fetchFeed, FEED_ATTEMPTS, entriesToStore, type FeedEntry, GIVE_UP_AFTER_MS, outcomeOf, parseFeed, resolveChannel, RETRY_MINUTES,
   type Segment, transcriptMatches, transcriptPart,
 } from './youtube.ts'
 
@@ -69,6 +69,47 @@ const entry = (id: string, day: number, short = false): FeedEntry => ({
   description: '',
   published_at: new Date(Date.UTC(2026, 10, day)).toISOString(),
   short,
+})
+
+// A fetch that answers from a list in turn (a status, or 'down' for a network error) and counts its calls
+function scripted(answers: (number | 'down')[]) {
+  const calls = { n: 0 }
+  const fetcher = (() => {
+    const a = answers[Math.min(calls.n++, answers.length - 1)]
+    if (a === 'down') return Promise.reject(new TypeError('error sending request: connection reset'))
+    return Promise.resolve(new Response(a === 200 ? FEED : 'Service Unavailable', { status: a }))
+  }) as unknown as typeof fetch
+  return { fetcher, calls }
+}
+
+Deno.test('fetchFeed: a 5xx or network error is tried again, up to FEED_ATTEMPTS; a 4xx is not', async () => {
+  let s = scripted([503, 'down', 200])
+  assertEquals((await fetchFeed('UCx', s.fetcher, 0)).title, '시황맨TV')
+  assertEquals(s.calls.n, 3)
+
+  s = scripted([503])
+  await assertRejects(() => fetchFeed('UCx', s.fetcher, 0), Error, `feed UCx: HTTP 503 (${FEED_ATTEMPTS} tries)`)
+  assertEquals(s.calls.n, FEED_ATTEMPTS)
+
+  s = scripted(['down'])
+  await assertRejects(() => fetchFeed('UCx', s.fetcher, 0), TypeError, 'connection reset')
+  assertEquals(s.calls.n, FEED_ATTEMPTS)
+
+  s = scripted([404])
+  await assertRejects(() => fetchFeed('UCx', s.fetcher, 0), Error, 'feed UCx: HTTP 404')
+  assertEquals(s.calls.n, 1)
+})
+
+Deno.test('channelDue / alertingFailures: a channel is failing only after FAILING_AFTER bad polls in a row', () => {
+  const now = Date.parse('2026-11-27T07:00:00Z')
+  const ago = (ms: number) => new Date(now - ms).toISOString()
+  assertEquals(channelDue({ poll_errors: FAILING_AFTER - 1, last_polled_at: ago(60_000) }, now), true)
+  assertEquals(channelDue({ poll_errors: FAILING_AFTER, last_polled_at: ago(60_000) }, now), false)
+  assertEquals(channelDue({ poll_errors: FAILING_AFTER, last_polled_at: ago(FAILING_RETRY_MS + 1) }, now), true)
+  assertEquals(channelDue({ poll_errors: 9, last_polled_at: null }, now), true)
+
+  const r = (channel: string, ok: boolean, errors: number) => ({ channel, ok, new_videos: 0, errors })
+  assertEquals(alertingFailures([r('a', true, 0), r('b', false, 1), r('c', false, FAILING_AFTER)]).map((x) => x.channel), ['c'])
 })
 
 Deno.test('entriesToStore: a first poll keeps the newest few (no Shorts); later polls only newer, unstored ones', () => {
