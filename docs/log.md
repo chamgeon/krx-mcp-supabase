@@ -189,6 +189,15 @@ What was done and why. Oldest first; new entries go at the bottom.
 - A filtered feed's digest shown as parts now lists the parts' own stocks, tickers and events, not the whole post's
   (`ehdwl/11341`: one Anthropic paragraph had 45 tickers). On the 64 chunked `anthropic-ipo` posts: 1,349 → 312.
 
+## 2026-11-28 — The 18:00 report read only 1,000 runs
+- The 11-27 report said "KIS: 28 snapshots today, last 11:20"; there were 78, the last at 17:05, all ok. It read
+  `ingest_runs` with `.limit(5000)`, but PostgREST answers at most 1,000 rows (Supabase's `max_rows`) and doesn't say it
+  cut. Since the market sets (11-26) a report window has ~1,400 runs (11-25 → 26: 1,017, 11-26 → 27: 1,406), so every
+  line missed the runs after the 1,000th (11:24 KST on 11-27). Data itself was complete.
+- The report now pages (`allRows`, moved to `_shared/rows.ts`; market-ingest and telegram-ingest had a copy each).
+- Deployed: `youtube-ingest` and `mcp` 11-27 16:52 KST, `pipeline-report` 11-28 10:30 (checked against the code). Since
+  then, YouTube: 211 runs, 1 alert (07:57 UTC, channels already at 2 failures before the deploy), all channels at 0.
+
 ## Open
 - Cold calls (+2.2–3.5 s each, every tool): keep-warm ping vs. moving the project to `us-east-1`. A ping keeps workers
   alive but probably not the DB connection (a 60 s pause already pays ~400–600 ms). Also `screen_stocks`' cold SQL
@@ -199,4 +208,5 @@ What was done and why. Oldest first; new entries go at the bottom.
 - 11-30: check the `live_prices` cleanup (no day older than 10 days; on 11-27 the oldest was still 11-19).
 - Markets: the 18:30 국고채 value is the day's final one; Yahoo 429s over a full US session (the `us` set first ran on
   Thanksgiving; Monday 11-30). Not collected: BOK base rate (ECOS key), US 2Y (Treasury.gov daily).
-- Deploy (2026-11-27 changes): `youtube-ingest` (feed retries) and `mcp` (parts' own tags).
+- `market-ingest` and `telegram-ingest` still run their own copy of `allRows` (11-26 deploys); the shared one goes out
+  with their next deploy (no change in behavior).

@@ -19,6 +19,7 @@ import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { kisGet, kisToken } from '../_shared/kis.ts'
 import { monitored } from '../_shared/ops.ts'
+import { allRows } from '../_shared/rows.ts'
 import { BONDS, chartDate, FX, inIndexHours, INDICES, type Kind, parseChart, parseIndex, type Quote } from './parse.ts'
 import YahooFinance from 'jsr:@gadicc/yahoo-finance2@4.0.5'
 import { GLOBAL, marketQuoteOf, MENTION_DAYS, QUOTE_BATCH, toYahoo, trackedTickers, US_INDICES, US_YIELDS, usQuoteOf, type UsQuote } from './us.ts'
@@ -115,17 +116,6 @@ Deno.serve(monitored(jobOf, supabase, async (req) => {
 }))
 
 // ---- ?set=us (Yahoo Finance) -------------------------------------------------------------------------------------
-
-/** Every row of a query, 1,000 at a time (PostgREST's page size). */
-async function allRows<T>(page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>): Promise<T[]> {
-  const out: T[] = []
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await page(from, from + 999)
-    if (error) throw new Error(error.message)
-    out.push(...(data ?? []))
-    if ((data ?? []).length < 1000) return out
-  }
-}
 
 /** US tickers in Telegram / X posts of the last MENTION_DAYS days, kept only if listed in us_symbols. */
 async function mentionedTickers(): Promise<{ mentioned: Set<string>; listed: Set<string> }> {

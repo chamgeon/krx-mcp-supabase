@@ -8,6 +8,7 @@
 import 'jsr:@supabase/functions-js@2.119.0/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.119.0'
 import { sendTelegram } from '../_shared/ops.ts'
+import { allRows } from '../_shared/rows.ts'
 import { buildReport, reportWindowEnd, type Run } from './report.ts'
 
 const KEEP_RUNS_DAYS = 90
@@ -32,9 +33,12 @@ Deno.serve(async (req) => {
     const todayIso = new Date(end.getTime() + 9 * 3600_000).toISOString().slice(0, 10)
 
     const [runs, pending, latest, channels, ytPending, ytOldest] = await Promise.all([
-      supabase.from('ingest_runs').select('job, started_at, ok, summary, error')
-        .gte('started_at', start.toISOString()).lt('started_at', end.toISOString())
-        .order('started_at').limit(5000),
+      // ~1,400 runs a day since 11-26: paged, as one request stops at 1,000 rows (_shared/rows.ts)
+      allRows<Run>((a, b) =>
+        supabase.from('ingest_runs').select('job, started_at, ok, summary, error')
+          .gte('started_at', start.toISOString()).lt('started_at', end.toISOString())
+          .order('started_at').order('id').range(a, b)
+      ).then((data) => ({ data, error: null })),
       // available_dates lists a KIS day as provisional only while KRX doesn't have it, so a provisional day before today
       // is one KRX hasn't loaded. Holidays never get KIS rows, so they can't show up here.
       supabase.from('available_dates').select('bas_dd').eq('final', false).lt('bas_dd', todayIso).order('bas_dd'),

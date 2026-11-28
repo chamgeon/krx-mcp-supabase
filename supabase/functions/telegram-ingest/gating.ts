@@ -14,6 +14,7 @@ import {
   symbolFileUrl, type UsSymbol,
 } from '../_shared/gate.ts'
 import { CHUNK_POSTS_OVER, chunkPost } from '../_shared/chunk.ts'
+import { allRows } from '../_shared/rows.ts'
 
 export const GATE_BATCH = 40 // posts per run: ~10 s at 8 calls at a time; a backlog of 1,000 posts drains in ~2 hours
 export const GATE_MAX = 500 // posts in one gate-only run (?gate=N), within the deadline below
@@ -32,16 +33,6 @@ export type GateSummary = {
   ms: number
   errors?: string[] // the first few failures
   error?: string // every call failed: something systematic (key, outage), so the run fails and alerts
-}
-
-async function allRows<T>(q: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>) {
-  const out: T[] = []
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await q(from, from + 999)
-    if (error) throw new Error(error.message)
-    out.push(...(data ?? []))
-    if (!data || data.length < 1000) return out
-  }
 }
 
 // The KRX stock list (latest day) and the US symbol list, cached per function instance
